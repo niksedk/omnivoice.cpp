@@ -104,33 +104,55 @@ static struct ggml_tensor * qwen3_rms_norm(struct ggml_context * ctx,
 // These build sub-graphs and return output tensors.
 // They operate on ggml layout: [H, S] for hidden states.
 
-// Self-attention: norm_in [H, S] -> attn_out [H, S]
+// Self-attention: norm_in [H, S, B] -> attn_out [H, S, B]
+//
+// B is the batch size on the trailing dim. B=1 keeps the historical 3D path
+// pixel-identical: the reshape and view ops collapse the trailing dim and
+// every kernel runs the exact same shapes as before. B>1 activates a parallel
+// 4D path that broadcasts the same projections, RoPE, and attention over the
+// extra batch dim, used by pipeline_tts_llm_forward_batched to fuse the
+// cond + uncond CFG rows in a single graph.
 static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
                                                   const Qwen3Config &   c,
                                                   Qwen3Layer *          ly,
-                                                  struct ggml_tensor *  x,          // [H, S]
+                                                  struct ggml_tensor *  x,          // [H, S] or [H, S, B]
                                                   struct ggml_tensor *  positions,  // [S] int32
-                                                  struct ggml_tensor *  mask,       // [S, S] or NULL
+                                                  struct ggml_tensor *  mask,
                                                   int                   S,
                                                   bool                  use_flash_attn = true,
-                                                  bool                  clamp_fp16     = false) {
+                                                  bool                  clamp_fp16     = false,
+                                                  int                   B              = 1) {
     int D   = c.head_dim;
     int Nh  = c.n_heads;
     int Nkv = c.n_kv_heads;
 
-    // 1) Q/K/V projections (fused, partial, or separate)
+    // 1) Q/K/V projections (fused, partial, or separate). Output keeps the
+    // batch dim trailing : [(q|kv)_dim, S] in 3D mode, [(q|kv)_dim, S, B] in 4D.
     struct ggml_tensor *q, *k, *v;
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
     if (ly->qkv) {
         struct ggml_tensor * qkv = qwen3_linear(ctx, ly->qkv, x);
-        q                        = ggml_cont(ctx, ggml_view_2d(ctx, qkv, q_dim, S, qkv->nb[1], 0));
-        k = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) q_dim * qkv->nb[0]));
-        v = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) (q_dim + kv_dim) * qkv->nb[0]));
+        if (B == 1) {
+            q = ggml_cont(ctx, ggml_view_2d(ctx, qkv, q_dim, S, qkv->nb[1], 0));
+            k = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) q_dim * qkv->nb[0]));
+            v = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kv_dim, S, qkv->nb[1], (size_t) (q_dim + kv_dim) * qkv->nb[0]));
+        } else {
+            q = ggml_cont(ctx, ggml_view_3d(ctx, qkv, q_dim, S, B, qkv->nb[1], qkv->nb[2], 0));
+            k = ggml_cont(ctx,
+                          ggml_view_3d(ctx, qkv, kv_dim, S, B, qkv->nb[1], qkv->nb[2], (size_t) q_dim * qkv->nb[0]));
+            v = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, B, qkv->nb[1], qkv->nb[2],
+                                            (size_t) (q_dim + kv_dim) * qkv->nb[0]));
+        }
     } else if (ly->qk) {
         struct ggml_tensor * qk = qwen3_linear(ctx, ly->qk, x);
-        q                       = ggml_cont(ctx, ggml_view_2d(ctx, qk, q_dim, S, qk->nb[1], 0));
-        k = ggml_cont(ctx, ggml_view_2d(ctx, qk, kv_dim, S, qk->nb[1], (size_t) q_dim * qk->nb[0]));
+        if (B == 1) {
+            q = ggml_cont(ctx, ggml_view_2d(ctx, qk, q_dim, S, qk->nb[1], 0));
+            k = ggml_cont(ctx, ggml_view_2d(ctx, qk, kv_dim, S, qk->nb[1], (size_t) q_dim * qk->nb[0]));
+        } else {
+            q = ggml_cont(ctx, ggml_view_3d(ctx, qk, q_dim, S, B, qk->nb[1], qk->nb[2], 0));
+            k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, B, qk->nb[1], qk->nb[2], (size_t) q_dim * qk->nb[0]));
+        }
         v = qwen3_linear(ctx, ly->v_proj, x);
     } else {
         q = qwen3_linear(ctx, ly->q_proj, x);
@@ -138,12 +160,20 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
         v = qwen3_linear(ctx, ly->v_proj, x);
     }
 
-    // 2) Reshape to heads: [X*D, S] -> [D, X, S]
-    q = ggml_reshape_3d(ctx, q, D, Nh, S);
-    k = ggml_reshape_3d(ctx, k, D, Nkv, S);
-    v = ggml_reshape_3d(ctx, v, D, Nkv, S);
+    // 2) Reshape to heads. In 3D mode keep the existing [D, X, S] layout. In
+    // 4D mode promote to [D, X, S, B] so the trailing batch dim flows through
+    // every downstream op.
+    if (B == 1) {
+        q = ggml_reshape_3d(ctx, q, D, Nh, S);
+        k = ggml_reshape_3d(ctx, k, D, Nkv, S);
+        v = ggml_reshape_3d(ctx, v, D, Nkv, S);
+    } else {
+        q = ggml_reshape_4d(ctx, q, D, Nh, S, B);
+        k = ggml_reshape_4d(ctx, k, D, Nkv, S, B);
+        v = ggml_reshape_4d(ctx, v, D, Nkv, S, B);
+    }
 
-    // 3) QK-Norm: per-head RMSNorm on D
+    // 3) QK-Norm: per-head RMSNorm on D, identical in 3D and 4D.
     q = ggml_rms_norm(ctx, q, c.rms_norm_eps);
     q = ggml_mul(ctx, q, qwen3_f32(ctx, ly->q_norm));
     k = ggml_rms_norm(ctx, k, c.rms_norm_eps);
@@ -155,7 +185,7 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     q = ggml_rope_ext(ctx, q, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     k = ggml_rope_ext(ctx, k, positions, NULL, D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
-    // 5) Permute for flash_attn_ext: [D, X, S] -> [D, S, X]
+    // 5) Permute for flash_attn_ext: [D, X, S(, B)] -> [D, S, X(, B)]
     q = ggml_permute(ctx, q, 0, 2, 1, 3);
     k = ggml_permute(ctx, k, 0, 2, 1, 3);
     v = ggml_permute(ctx, v, 0, 2, 1, 3);
@@ -174,8 +204,12 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
         ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
     }
 
-    // 7) Reshape back: [D, Nh, S] -> [Nh*D, S]
-    attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
+    // 7) Reshape back: [D, Nh, S(, B)] -> [Nh*D, S(, B)]
+    if (B == 1) {
+        attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
+    } else {
+        attn = ggml_reshape_3d(ctx, attn, Nh * D, S, B);
+    }
 
     // 8) O projection
     return qwen3_linear(ctx, ly->o_proj, attn);
@@ -199,9 +233,10 @@ static struct ggml_tensor * qwen3_build_mlp(struct ggml_context * ctx,
     return qwen3_linear(ctx, ly->down_proj, ff);
 }
 
-// Single layer: input [H, S] -> output [H, S]
+// Single layer: input [H, S(, B)] -> output [H, S(, B)]
 // When sub_outs is non null, the layer pushes (norm1, attn, norm2, mlp) for
 // post inspection. Sub tensors are pre residual outputs of each sub-module.
+// B is forwarded to qwen3_build_self_attn for batched MaskGIT decoding.
 static struct ggml_tensor * qwen3_build_layer(struct ggml_context *               ctx,
                                               const Qwen3Config &                 c,
                                               Qwen3Layer *                        ly,
@@ -211,13 +246,15 @@ static struct ggml_tensor * qwen3_build_layer(struct ggml_context *             
                                               int                                 S,
                                               bool                                use_flash_attn = true,
                                               bool                                clamp_fp16     = false,
-                                              std::vector<struct ggml_tensor *> * sub_outs       = nullptr) {
+                                              std::vector<struct ggml_tensor *> * sub_outs       = nullptr,
+                                              int                                 B              = 1) {
     // Self-attention block
     struct ggml_tensor * norm = qwen3_rms_norm(ctx, hidden, ly->input_layernorm, c.rms_norm_eps);
     if (sub_outs) {
         sub_outs->push_back(norm);
     }
-    struct ggml_tensor * attn = qwen3_build_self_attn(ctx, c, ly, norm, positions, mask, S, use_flash_attn, clamp_fp16);
+    struct ggml_tensor * attn =
+        qwen3_build_self_attn(ctx, c, ly, norm, positions, mask, S, use_flash_attn, clamp_fp16, B);
     if (sub_outs) {
         sub_outs->push_back(attn);
     }
@@ -243,11 +280,12 @@ static struct ggml_tensor * qwen3_build_layer(struct ggml_context *             
     return hidden;
 }
 
-// Full N-layer stack: input [H, S] -> output [H, S] (post final-norm)
+// Full N-layer stack: input [H, S(, B)] -> output [H, S(, B)] (post final-norm)
 // intermediates: optional out-param. When non-null, the hidden tensor right
 // after each layer index listed in intermediate_indices is appended (in the
 // same order as those indices). Caller must ggml_set_output on them before
 // the graph build.
+// B is the optional trailing batch dim, see qwen3_build_self_attn.
 static struct ggml_tensor * qwen3_build_layers(struct ggml_context *               ctx,
                                                const Qwen3Config &                 c,
                                                Qwen3Layer *                        layers,
@@ -261,11 +299,12 @@ static struct ggml_tensor * qwen3_build_layers(struct ggml_context *            
                                                const std::vector<int> *            intermediate_indices = nullptr,
                                                std::vector<struct ggml_tensor *> * intermediates        = nullptr,
                                                int                                 dump_sub_layer       = -1,
-                                               std::vector<struct ggml_tensor *> * sub_outs             = nullptr) {
+                                               std::vector<struct ggml_tensor *> * sub_outs             = nullptr,
+                                               int                                 B                    = 1) {
     for (int i = 0; i < c.n_layers; i++) {
         std::vector<struct ggml_tensor *> * subs_for_this = (i == dump_sub_layer) ? sub_outs : nullptr;
         hidden = qwen3_build_layer(ctx, c, &layers[i], hidden, positions, mask, S, use_flash_attn, clamp_fp16,
-                                   subs_for_this);
+                                   subs_for_this, B);
         if (intermediate_indices && intermediates) {
             for (int idx : *intermediate_indices) {
                 if (idx == i) {

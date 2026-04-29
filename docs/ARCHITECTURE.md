@@ -241,16 +241,53 @@ Schedule of newly unmasked positions per step is computed from
 `_get_time_steps(t_start=0, t_end=1, num_step, t_shift=0.1)` then
 `ceil(N_total * (t[step+1] - t[step]))`. 32 steps default.
 
-KV cache is not usable : tokens reveal in arbitrary positions across
-the 8 codebook layers each step, so each step is a full prefill.
-Inference is therefore `num_step * 2 * forward_full(B, S)` (the 2
-accounts for cond + uncond).
+KV cache is not usable across MaskGIT steps. The attention is fully
+bidirectional, so the prefix hidden states depend on the current
+target state through every layer. As tokens get progressively
+unmasked the K and V tensors of the prefix at every layer above the
+embeddings drift, which forbids the standard prefix-cache trick that
+works for causal LMs. Each step is therefore a full prefill of the
+LLM at cost `2 * forward_full(B, S)` (the 2 accounts for the cond +
+uncond CFG rows).
 
 Determinism. With `class_temperature = 0` and `position_temperature = 0`
 the decoder is bit deterministic. Higher temperatures rely on a
 seedable Philox4x32-10 PRNG. The pipeline threads the Philox counter
 across MaskGIT calls so that chunked inference matches the global RNG
 drift of the PyTorch reference.
+
+#### Inner-loop optimisations
+
+The 32 steps of one chunk run on a fixed shape (`S`, `K`, `B'`) so
+the per-step overhead can be cut without touching the math.
+
+`pipeline_tts_llm_forward_batched` accepts a `T_audio` parameter that
+narrows the GPU output to the audio window only. The MaskGIT decoder
+reads cond logits at `[S - T, S)` on row 0 and uncond logits at
+`[0, T)` on row 1, so the full `[B', V, K, S]` tensor is wasteful.
+With `T_audio > 0` the function builds two `ggml_view_4d` over those
+ranges, makes them contiguous via `ggml_cont`, and only those two
+sub-tensors are flagged as graph outputs. The GPU to CPU copy shrinks
+from `B' * V * K * S` floats to `2 * V * K * T_audio` floats, around
+5.6x less on the typical voice cloning shape (S ~ 1880, T ~ 350).
+When `T_audio == 0` the function falls back to the full output, used
+by the debug dump path that needs every position.
+
+`MaskgitBatchedCtx` holds the inputs that stay constant across the
+32 steps : the F32 audio mask and its complement, the RoPE position
+vector, and the F16 attention bias. The bias is the heaviest piece,
+`B' * S * S` F16 conversions per step (about 7 M ops on the typical
+shape). `pipeline_tts_llm_batched_ctx_init` precomputes the bias once
+per chunk, with a single `ggml_fp32_to_fp16` call for each of the two
+distinct values (1.0 and 0.0) hoisted out of the conversion loop. The
+context also keeps the original int32 pointers so the debug loop path
+can hand them down to the single forward unchanged.
+
+Both optimisations preserve the math exactly, the only side effect is
+a slight reordering of the GPU FP32 reductions when the scheduler
+fuses the new output nodes differently, which moves the audio cosine
+similarity by a few times 1e-6. Token-level results stay 100 percent
+exact against the PyTorch reference.
 
 ### Audio tokenizer pipeline
 
@@ -716,20 +753,20 @@ prompt :
 
 ```
 TTS    chunked: Logits cos=1.000000 max 3.5e-04
-                Step0 pred_tokens 99.96% (1 FP flip)
+                Step0 pred_tokens 99.93% (2 FP flips)
                 Tokens 1.000000 exact 100.00%
-                Audio  0.999996
+                Audio  0.999991
 
-Clone  chunked: Lf hidden cos=1.000000 max 1.7e-03
+Clone  chunked: Lf hidden cos=1.000000 max 1.9e-03
                 Logits  cos=1.000000
-                Step0 pred_tokens 99.96% (1 FP flip)
+                Step0 pred_tokens 100.00%
                 Tokens 1.000000 exact 100.00%
                 Audio  0.999989
 ```
 
-The single Step0 token flip is an argmax tie at the FP epsilon (~2e-5
-between top1 and top2 at one position), inherent to the mixed cuBLAS
-vs GGML kernel arithmetic. It resorbs over the 32 MaskGIT steps so
+The few Step0 token flips are argmax ties at the FP epsilon (~2e-5
+between top1 and top2 at those positions), inherent to the mixed cuBLAS
+vs GGML kernel arithmetic. They resorb over the 32 MaskGIT steps so
 the final tokens match bit for bit and decoded audio cosine is
 > 0.9999.
 

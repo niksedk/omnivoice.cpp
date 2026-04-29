@@ -14,6 +14,7 @@
 #include "prompt-tts.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -165,7 +166,14 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         T, K, S, cfg.num_step, (double) cfg.guidance_scale, (double) cfg.t_shift, (double) cfg.layer_penalty_factor,
         (double) cfg.class_temperature, (double) cfg.position_temperature);
 
-    const size_t per_item = (size_t) V * (size_t) K * (size_t) S;
+    double fwd_total_ms = 0.0;
+
+    // Cache the inputs that stay constant across the 32 MaskGIT steps. The
+    // attention mask in particular is heavy to convert to F16 (~9 ms on the
+    // typical voice cloning shape) and was being rebuilt every step.
+    MaskgitBatchedCtx batched_ctx;
+    pipeline_tts_llm_batched_ctx_init(&batched_ctx, prompt->audio_mask.data(), prompt->attention_mask.data(), B_prime,
+                                      S);
 
     for (int step = 0; step < cfg.num_step; step++) {
         int k_demask = sched[step];
@@ -173,26 +181,37 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
             continue;
         }
 
-        const char *       hidden_dump = (step == 0 && dump_dir) ? dump_dir : nullptr;
-        std::vector<float> logits_full =
-            pipeline_tts_llm_forward_batched(pt, prompt->input_ids.data(), prompt->audio_mask.data(),
-                                             prompt->attention_mask.data(), B_prime, K, S, hidden_dump);
-        if (logits_full.size() != (size_t) B_prime * per_item) {
-            fprintf(stderr, "[MaskGIT] FATAL: forward returned %zu f32 (expected %zu)\n", logits_full.size(),
-                    (size_t) B_prime * per_item);
+        const char *                                hidden_dump = (step == 0 && dump_dir) ? dump_dir : nullptr;
+        const std::chrono::steady_clock::time_point fwd_t0      = std::chrono::steady_clock::now();
+        std::vector<float>                          logits_full =
+            pipeline_tts_llm_forward_batched(pt, prompt->input_ids.data(), &batched_ctx, K, T, hidden_dump);
+        const std::chrono::steady_clock::time_point fwd_t1 = std::chrono::steady_clock::now();
+        fwd_total_ms += std::chrono::duration<double, std::milli>(fwd_t1 - fwd_t0).count();
+
+        // The forward returns either the full B'*V*K*S logits (debug path,
+        // hidden_dump set) or just the audio window 2*V*K*T (production path).
+        // Adapt the offsets accordingly.
+        const bool   audio_only    = (hidden_dump == nullptr);
+        const size_t per_audio     = (size_t) V * (size_t) K * (size_t) T;
+        const size_t per_full_item = (size_t) V * (size_t) K * (size_t) S;
+        const size_t expected      = audio_only ? 2 * per_audio : (size_t) B_prime * per_full_item;
+        if (logits_full.size() != expected) {
+            fprintf(stderr, "[MaskGIT] FATAL: forward returned %zu f32 (expected %zu)\n", logits_full.size(), expected);
             return {};
         }
 
         // Extract cond and uncond logits at audio positions, layout [K, T, V].
-        // Source index  : (b * S + s) * K * V + k * V + v
-        //   where for cond  s = audio_start_cond + t,  for uncond s = t.
+        // Audio-only path : cond and uncond are already compact [V, K, T] per
+        // row, source index = (t * K + k) * V on each row.
+        // Full path : cond row 0 audio is at S range [audio_start_cond, S),
+        // uncond row 1 audio is at [0, T).
         std::vector<float> c_log((size_t) K * (size_t) T * (size_t) V);
         std::vector<float> u_log((size_t) K * (size_t) T * (size_t) V);
-        const float *      src_cond   = logits_full.data() + 0 * per_item;
-        const float *      src_uncond = logits_full.data() + 1 * per_item;
+        const float *      src_cond = audio_only ? logits_full.data() : logits_full.data() + 0 * per_full_item;
+        const float * src_uncond = audio_only ? logits_full.data() + per_audio : logits_full.data() + 1 * per_full_item;
         for (int k = 0; k < K; k++) {
             for (int t = 0; t < T; t++) {
-                size_t cond_off   = ((size_t) (audio_start_cond + t) * K + k) * V;
+                size_t cond_off = audio_only ? ((size_t) t * K + k) * V : ((size_t) (audio_start_cond + t) * K + k) * V;
                 size_t uncond_off = ((size_t) t * K + k) * V;
                 size_t dst_off    = ((size_t) k * T + t) * V;
                 std::copy(src_cond + cond_off, src_cond + cond_off + V, c_log.begin() + dst_off);
@@ -335,6 +354,9 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         fprintf(stderr, "[MaskGIT-Step] %d/%d demask=%d remaining=%d\n", step + 1, cfg.num_step, k_demask,
                 (int) std::count(tokens.begin(), tokens.end(), mask_id));
     }
+
+    fprintf(stderr, "[MaskGIT] Total LM forward: %.2f ms across %d steps (avg %.2f ms/step)\n", fwd_total_ms,
+            cfg.num_step, fwd_total_ms / (double) cfg.num_step);
 
     if (ctr_lo_inout != nullptr) {
         *ctr_lo_inout = ctr_lo;

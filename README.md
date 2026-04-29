@@ -67,23 +67,6 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model, the
 GGUF layout, the inference pipeline, every CLI flag, and the
 validation results.
 
-## Optimisation roadmap
-
-Active speed-up tracks for the inference pipeline.
-
-**MaskGIT prefix KV cache** (high impact, in progress). The decoder
-re-computes attention K and V for the full sequence on every step,
-including the invariant prefix (denoise + lang + instruct + text +
-ref_audio_codes). Caching the prefix K/V and recomputing only the
-target zone saves a fraction of the attention compute proportional
-to `prefix / (prefix + target)`. Voice cloning chunk 0 with a long
-reference is around 77 percent cacheable, expected gain 3 to 4x on
-the MaskGIT phase.
-
-**Persistent buffers across chunks** (low impact, easy). The graph
-allocator is currently rebuilt per chunk. Sizing it once on the
-worst-case chunk and reusing it cuts the per-chunk setup overhead.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).

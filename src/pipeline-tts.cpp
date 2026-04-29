@@ -286,34 +286,97 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
     return out;
 }
 
-// Batched LLM forward : B' independent forwards stacked. Each batch row may
-// carry its own attention_mask, useful for the cond + uncond CFG batching
-// where the uncond row uses a diagonal padding past its effective length.
-std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *   pt,
-                                                    const int32_t * input_ids,
-                                                    const int32_t * audio_mask,
-                                                    const int32_t * attention_mask,
-                                                    int             B_prime,
-                                                    int             K,
-                                                    int             S,
-                                                    const char *    dump_hidden_dir) {
+// Pre-compute the constant inputs that stay identical across the 32 MaskGIT
+// steps of one chunk. attn_f16 is the only really expensive piece (B' * S * S
+// F16 conversions, ~7 M ops on the typical voice cloning shape) so the win
+// from caching is mostly there. mask_f / inv_mask / positions are smaller
+// but free to cache too.
+void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
+                                       const int32_t *     audio_mask,
+                                       const int32_t *     attention_mask,
+                                       int                 B_prime,
+                                       int                 S) {
+    ctx->B_prime        = B_prime;
+    ctx->S              = S;
+    ctx->audio_mask_raw = audio_mask;
+    ctx->attn_mask_raw  = attention_mask;
+    ctx->has_attn_mask  = (attention_mask != NULL);
+
+    ctx->mask_f.resize((size_t) B_prime * (size_t) S);
+    ctx->inv_mask_f.resize((size_t) B_prime * (size_t) S);
+    for (int b = 0; b < B_prime; b++) {
+        for (int s = 0; s < S; s++) {
+            int m                               = (audio_mask[(size_t) b * S + s] != 0) ? 1 : 0;
+            ctx->mask_f[(size_t) b * S + s]     = (float) m;
+            ctx->inv_mask_f[(size_t) b * S + s] = (float) (1 - m);
+        }
+    }
+
+    ctx->positions.resize(S);
+    for (int i = 0; i < S; i++) {
+        ctx->positions[i] = i;
+    }
+
+    // The mask only takes two values (1.0 and 0.0). Pre-convert them once
+    // instead of calling ggml_fp32_to_fp16 in the inner loop, which dominates
+    // the CPU pre-compute on large S.
+    if (ctx->has_attn_mask) {
+        const uint16_t f16_one  = ggml_fp32_to_fp16(1.0f);
+        const uint16_t f16_zero = ggml_fp32_to_fp16(0.0f);
+        const size_t   n        = (size_t) B_prime * (size_t) S * (size_t) S;
+        ctx->attn_f16.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            ctx->attn_f16[i] = (attention_mask[i] != 0) ? f16_one : f16_zero;
+        }
+    } else {
+        ctx->attn_f16.clear();
+    }
+}
+
+// Batched LLM forward : single graph that fuses B' independent forwards on the
+// trailing batch dim. Used for the cond + uncond CFG batching where row 0 is
+// the cond row and row 1 is the uncond row, both running on the same S window.
+// Pre-computed buffers (mask_f, inv_mask_f, positions, attn_f16) come from
+// the ctx, shared across the 32 MaskGIT steps of a chunk.
+std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt,
+                                                    const int32_t *           input_ids,
+                                                    const MaskgitBatchedCtx * ctx,
+                                                    int                       K,
+                                                    int                       T_audio,
+                                                    const char *              dump_hidden_dir) {
+    if (!ctx) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: ctx is NULL\n");
+        return {};
+    }
+    const int B_prime = ctx->B_prime;
+    const int S       = ctx->S;
     if (B_prime <= 0 || K <= 0 || S <= 0) {
         return {};
     }
-    const int          V        = pt->lm.audio_vocab_size;
-    const size_t       per_item = (size_t) V * (size_t) K * (size_t) S;
-    std::vector<float> out((size_t) B_prime * per_item);
+    if (K > pt->lm.num_audio_codebook) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: K=%d exceeds num_audio_codebook=%d\n", K,
+                pt->lm.num_audio_codebook);
+        return {};
+    }
+    if (T_audio > S) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: T_audio=%d exceeds S=%d\n", T_audio, S);
+        return {};
+    }
+    // Hidden-state debug dumps still go through the single-forward path so the
+    // cond and uncond rows land in their own bin files.
+    const bool force_loop = getenv("OMNIVOICE_LOOP_FORWARD") != nullptr;
+    if (dump_hidden_dir || force_loop) {
+        const int          V        = pt->lm.audio_vocab_size;
+        const size_t       per_item = (size_t) V * (size_t) K * (size_t) S;
+        std::vector<float> out((size_t) B_prime * per_item);
+        for (int b = 0; b < B_prime; b++) {
+            const int32_t * ids_b  = input_ids + (size_t) b * (size_t) K * (size_t) S;
+            const int32_t * mask_b = ctx->audio_mask_raw + (size_t) b * (size_t) S;
+            const int32_t * attn_b =
+                ctx->has_attn_mask ? ctx->attn_mask_raw + (size_t) b * (size_t) S * (size_t) S : NULL;
 
-    for (int b = 0; b < B_prime; b++) {
-        const int32_t * ids_b  = input_ids + (size_t) b * (size_t) K * (size_t) S;
-        const int32_t * mask_b = audio_mask + (size_t) b * (size_t) S;
-        const int32_t * attn_b = attention_mask ? attention_mask + (size_t) b * (size_t) S * (size_t) S : NULL;
-
-        // Cond is row 0, uncond is row 1 (CFG batching convention). Map to
-        // human readable names so the Python reference can be paired easily.
-        const char * hidden_name = nullptr;
-        char         hidden_buf[64];
-        if (dump_hidden_dir) {
+            const char * hidden_name = nullptr;
+            char         hidden_buf[64];
             if (b == 0) {
                 hidden_name = "lm-hidden-step0-cond";
             } else if (b == 1) {
@@ -322,17 +385,189 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *   pt,
                 snprintf(hidden_buf, sizeof(hidden_buf), "lm-hidden-step0-b%d", b);
                 hidden_name = hidden_buf;
             }
+            std::vector<float> logits_b =
+                pipeline_tts_llm_forward(pt, ids_b, mask_b, attn_b, K, S, dump_hidden_dir, hidden_name);
+            if (logits_b.size() != per_item) {
+                fprintf(stderr, "[LM-Forward-Batched] FATAL: dump-mode item %d returned %zu f32 (expected %zu)\n", b,
+                        logits_b.size(), per_item);
+                return {};
+            }
+            std::copy(logits_b.begin(), logits_b.end(), out.begin() + (size_t) b * per_item);
         }
-
-        std::vector<float> logits_b =
-            pipeline_tts_llm_forward(pt, ids_b, mask_b, attn_b, K, S, dump_hidden_dir, hidden_name);
-        if (logits_b.size() != per_item) {
-            fprintf(stderr, "[LM-Forward] FATAL: batched item %d returned %zu f32 (expected %zu)\n", b, logits_b.size(),
-                    per_item);
-            return {};
-        }
-        std::copy(logits_b.begin(), logits_b.end(), out.begin() + (size_t) b * per_item);
+        return out;
     }
+
+    const Qwen3Config & cfg = pt->lm.cfg;
+    const int           V   = pt->lm.audio_vocab_size;
+    const int           H   = cfg.hidden_size;
+
+    // CPU pre-compute that depends on input_ids (mutates between MaskGIT
+    // steps via the demask injection). Layouts :
+    //   text_ids_buf [B_prime, S]    matches t_text_ids [B_prime * S], b slow
+    //   shifted      [K, B_prime, S] matches t_shifted [B_prime * S, K], k slow
+    std::vector<int32_t> shifted((size_t) K * (size_t) B_prime * (size_t) S);
+    std::vector<int32_t> text_ids_buf((size_t) B_prime * (size_t) S);
+    for (int b = 0; b < B_prime; b++) {
+        for (int s = 0; s < S; s++) {
+            int m                            = (ctx->audio_mask_raw[(size_t) b * S + s] != 0) ? 1 : 0;
+            text_ids_buf[(size_t) b * S + s] = input_ids[((size_t) b * (size_t) K + 0) * (size_t) S + s];
+            for (int k = 0; k < K; k++) {
+                shifted[((size_t) k * (size_t) B_prime + (size_t) b) * (size_t) S + s] =
+                    input_ids[((size_t) b * (size_t) K + (size_t) k) * (size_t) S + s] * m + k * V;
+            }
+        }
+    }
+
+    // Node budget : custom embed ~30, 28L stack ~850 (4D adds a few reshape
+    // nodes per layer), audio_heads + reshape ~5. 8192 stays comfortable.
+    const int    n_max_nodes    = 8192;
+    const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
+
+    struct ggml_init_params gp   = { graph_ctx_size, NULL, /*no_alloc=*/true };
+    struct ggml_context *   gctx = ggml_init(gp);
+    if (!gctx) {
+        return {};
+    }
+
+    struct ggml_tensor * t_text_ids = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, B_prime * S);
+    ggml_set_name(t_text_ids, "text_ids");
+    ggml_set_input(t_text_ids);
+
+    struct ggml_tensor * t_shifted = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, B_prime * S, K);
+    ggml_set_name(t_shifted, "shifted_ids");
+    ggml_set_input(t_shifted);
+
+    // [1, S, B_prime] so multiplying with hidden states [H, S, B_prime]
+    // broadcasts on H (dim 0) and matches per (s, b).
+    struct ggml_tensor * t_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
+    ggml_set_name(t_mask, "mask");
+    ggml_set_input(t_mask);
+
+    struct ggml_tensor * t_inv_mask = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, 1, S, B_prime);
+    ggml_set_name(t_inv_mask, "inv_mask");
+    ggml_set_input(t_inv_mask);
+
+    // RoPE positions are 0..S-1, identical for cond and uncond rows.
+    struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, S);
+    ggml_set_name(t_positions, "positions");
+    ggml_set_input(t_positions);
+
+    // Per-row attention bias. flash_attn_ext expects mask [n_kv, n_batch, ne32, ne33]
+    // with n_head broadcast through ne32 and the outer batch through ne33. Layout
+    // [S, S, 1, B_prime] : skv fast, sq mid, head broadcast, batch on the slowest.
+    struct ggml_tensor * t_attn = NULL;
+    if (ctx->has_attn_mask) {
+        t_attn = ggml_new_tensor_4d(gctx, GGML_TYPE_F16, S, S, 1, B_prime);
+        ggml_set_name(t_attn, "attn_mask");
+        ggml_set_input(t_attn);
+    }
+
+    // Custom embed. The flat get_rows runs on a B_prime * S row index buffer
+    // and produces [H, B_prime * S] which we promote to [H, S, B_prime] before
+    // the multiply broadcast and the stack.
+    struct ggml_tensor * text_embeds_flat  = ggml_get_rows(gctx, pt->lm.embed_tokens, t_text_ids);
+    struct ggml_tensor * audio_embeds_flat = NULL;
+    for (int k = 0; k < K; k++) {
+        struct ggml_tensor * idx_k =
+            ggml_view_1d(gctx, t_shifted, B_prime * S, (size_t) k * (size_t) (B_prime * S) * sizeof(int32_t));
+        struct ggml_tensor * emb_k = ggml_get_rows(gctx, pt->lm.audio_embeddings, idx_k);
+        audio_embeds_flat          = (k == 0) ? emb_k : ggml_add(gctx, audio_embeds_flat, emb_k);
+    }
+    struct ggml_tensor * text_embeds   = ggml_reshape_3d(gctx, text_embeds_flat, H, S, B_prime);
+    struct ggml_tensor * audio_embeds  = ggml_reshape_3d(gctx, audio_embeds_flat, H, S, B_prime);
+    struct ggml_tensor * text_branch   = ggml_mul(gctx, text_embeds, t_inv_mask);
+    struct ggml_tensor * audio_branch  = ggml_mul(gctx, audio_embeds, t_mask);
+    struct ggml_tensor * inputs_embeds = ggml_add(gctx, text_branch, audio_branch);
+
+    // 28L Qwen3 stack with B = B_prime, mask carried per-row.
+    struct ggml_tensor * hidden =
+        qwen3_build_layers(gctx, cfg, pt->lm.layers, pt->lm.final_norm, inputs_embeds, t_positions, t_attn, S,
+                           pt->use_flash_attn, pt->clamp_fp16, nullptr, nullptr, -1, nullptr, B_prime);
+
+    // audio_heads readout. hidden is [H, S, B_prime], audio_heads is [H, V*K],
+    // mul_mat returns [V*K, S, B_prime] which we reshape to [V, K, S, B_prime].
+    // Linear memory order [B_prime, S, K, V] matches the per-item layout the
+    // single forward returns (V*K*S floats per row, B' rows stacked), so the
+    // MaskGIT decoder reads it without further reshuffle.
+    struct ggml_tensor * logits_flat = ggml_mul_mat(gctx, pt->lm.audio_heads, hidden);
+    struct ggml_tensor * logits      = ggml_reshape_4d(gctx, logits_flat, V, K, S, B_prime);
+    ggml_set_name(logits, "audio_logits");
+
+    // Audio truncation : when T_audio > 0, the MaskGIT decoder only reads the
+    // audio positions on cond row 0 (S range [S - T_audio, S)) and on uncond
+    // row 1 (S range [0, T_audio)). Cutting these views before set_output
+    // shrinks the GPU->CPU transfer from B_prime * V * K * S floats down to
+    // 2 * V * K * T_audio floats, ~5.6x less for the typical voice cloning
+    // shape. Math is identical : we just keep less of the same elements.
+    struct ggml_tensor * cond_audio   = nullptr;
+    struct ggml_tensor * uncond_audio = nullptr;
+    if (T_audio > 0) {
+        size_t               cond_offset = (size_t) (S - T_audio) * logits->nb[2] + (size_t) 0 * logits->nb[3];
+        struct ggml_tensor * cond_view =
+            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], cond_offset);
+        cond_audio = ggml_cont(gctx, cond_view);
+        ggml_set_name(cond_audio, "cond_audio_logits");
+        ggml_set_output(cond_audio);
+
+        size_t               uncond_offset = (size_t) 0 * logits->nb[2] + (size_t) 1 * logits->nb[3];
+        struct ggml_tensor * uncond_view =
+            ggml_view_4d(gctx, logits, V, K, T_audio, 1, logits->nb[1], logits->nb[2], logits->nb[3], uncond_offset);
+        uncond_audio = ggml_cont(gctx, uncond_view);
+        ggml_set_name(uncond_audio, "uncond_audio_logits");
+        ggml_set_output(uncond_audio);
+    } else {
+        ggml_set_output(logits);
+    }
+
+    struct ggml_cgraph * graph = ggml_new_graph_custom(gctx, n_max_nodes, false);
+    if (T_audio > 0) {
+        ggml_build_forward_expand(graph, cond_audio);
+        ggml_build_forward_expand(graph, uncond_audio);
+    } else {
+        ggml_build_forward_expand(graph, logits);
+    }
+
+    ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(pt->backend));
+    if (!ggml_gallocr_alloc_graph(alloc, graph)) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: gallocr_alloc_graph failed (B'=%d K=%d S=%d)\n", B_prime, K, S);
+        ggml_gallocr_free(alloc);
+        ggml_free(gctx);
+        return {};
+    }
+
+    ggml_backend_tensor_set(t_text_ids, text_ids_buf.data(), 0, (size_t) B_prime * (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(t_shifted, shifted.data(), 0, (size_t) K * (size_t) B_prime * (size_t) S * sizeof(int32_t));
+    ggml_backend_tensor_set(t_mask, ctx->mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+    ggml_backend_tensor_set(t_inv_mask, ctx->inv_mask_f.data(), 0, (size_t) B_prime * (size_t) S * sizeof(float));
+    ggml_backend_tensor_set(t_positions, ctx->positions.data(), 0, (size_t) S * sizeof(int32_t));
+
+    if (t_attn) {
+        ggml_backend_tensor_set(t_attn, ctx->attn_f16.data(), 0,
+                                (size_t) B_prime * (size_t) S * (size_t) S * sizeof(uint16_t));
+    }
+
+    enum ggml_status st = ggml_backend_graph_compute(pt->backend, graph);
+    if (st != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[LM-Forward-Batched] FATAL: graph_compute status=%d\n", (int) st);
+        ggml_gallocr_free(alloc);
+        ggml_free(gctx);
+        return {};
+    }
+
+    std::vector<float> out;
+    if (T_audio > 0) {
+        const size_t per_audio = (size_t) V * (size_t) K * (size_t) T_audio;
+        out.resize(2 * per_audio);
+        ggml_backend_tensor_get(cond_audio, out.data(), 0, per_audio * sizeof(float));
+        ggml_backend_tensor_get(uncond_audio, out.data() + per_audio, 0, per_audio * sizeof(float));
+    } else {
+        const size_t n = ggml_nelements(logits);
+        out.resize(n);
+        ggml_backend_tensor_get(logits, out.data(), 0, n * sizeof(float));
+    }
+
+    ggml_gallocr_free(alloc);
+    ggml_free(gctx);
     return out;
 }
 
