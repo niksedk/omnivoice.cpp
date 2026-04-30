@@ -31,14 +31,12 @@ from omnivoice.utils.common import fix_random_seed
 
 CKPT = "../checkpoints/OmniVoice"
 
-
 def load_dump(path):
     raw = np.fromfile(path, dtype=np.uint8)
     nd = int(np.frombuffer(raw[0:4], dtype=np.int32)[0])
     sh = tuple(int(x) for x in np.frombuffer(raw[4:4 + 4 * nd], dtype=np.int32))
     body = np.frombuffer(raw[4 + 4 * nd:], dtype=np.float32)
     return body.reshape(sh)
-
 
 def cos(a, b):
     a = a.astype(np.float64).ravel()
@@ -48,6 +46,25 @@ def cos(a, b):
     d = float(np.linalg.norm(a) * np.linalg.norm(b))
     return float(np.dot(a, b) / d) if d > 1e-10 else 0.0
 
+def stft_cos(a, b, win=2048, hop=512):
+    # STFT magnitude cosine. Drops phase, so a constant time shift between
+    # the two waveforms does not collapse the score. Mirrors the helper in
+    # debug-{tts,clone}-cossim.py.
+    a = a.astype(np.float64).ravel()
+    b = b.astype(np.float64).ravel()
+    n = min(len(a), len(b))
+    a, b = a[:n], b[:n]
+    window = np.hanning(win)
+    frames = (n - win) // hop + 1
+    if frames <= 0:
+        return 0.0
+    sa = np.zeros((frames, win // 2 + 1))
+    sb = np.zeros((frames, win // 2 + 1))
+    for i in range(frames):
+        s = i * hop
+        sa[i] = np.abs(np.fft.rfft(a[s:s + win] * window))
+        sb[i] = np.abs(np.fft.rfft(b[s:s + win] * window))
+    return cos(sa.ravel(), sb.ravel())
 
 def decode_tokens(model, tokens_kt):
     """tokens_kt is [K, T] int. Returns float32 mono numpy array of samples."""
@@ -64,7 +81,6 @@ def decode_tokens(model, tokens_kt):
     elif wav.ndim == 2:
         wav = wav[0]
     return np.asarray(wav, dtype=np.float32)
-
 
 def main():
     fix_random_seed(42)
@@ -98,23 +114,27 @@ def main():
     raw_pt  = load_dump("python/output-audio.bin").astype(np.float32)
 
     # Sanity: the Python decoder on Python tokens must reproduce the Python
-    # raw audio and the Python WAV. Anything below ~1.0 here means the
-    # reference path itself is unstable.
+    # raw audio exactly. Anything below 1.0 means the reference path itself
+    # is unstable.
     print(f"[Sanity] PyDecoder(PyTokens) vs PyRaw: {cos(audio_pt_from_pt, raw_pt):.6f}")
-    print(f"[Sanity] PyDecoder(PyTokens) vs PyWAV: {cos(audio_pt_from_pt, pt_wav):.6f}")
 
     # Cross: the Python decoder fed the GGML tokens. If this matches the GGML
     # raw audio, the GGML decoder is bit equivalent and the divergence lives
     # entirely upstream in the LM and MaskGIT path.
     print(f"[Cross] PyDecoder(GgmlTokens) vs GgmlRaw: {cos(audio_pt_from_cpp, raw_cpp):.6f}")
-    print(f"[Cross] PyDecoder(GgmlTokens) vs GgmlWAV: {cos(audio_pt_from_cpp, cpp_wav):.6f}")
-    print(f"[Cross] PyDecoder(GgmlTokens) vs PyWAV: {cos(audio_pt_from_cpp, pt_wav):.6f}")
+
+    # Full pipeline parity. Both WAVs went through identical post processing
+    # (fade_and_pad, silence trim, peak normalize), so frame aligned STFT
+    # magnitude cosine is the right metric. Comparing raw vs WAV here would
+    # collapse to ~0 because of the 2400 sample fade pad inserted at the
+    # head, regardless of decoder quality.
+    n = min(len(cpp_wav), len(pt_wav))
+    print(f"[Pipeline] cpp_wav vs pt_wav stft_cos: {stft_cos(cpp_wav[:n], pt_wav[:n]):.6f}")
 
     n = min(tok_cpp.size, tok_pt.size)
     a = tok_cpp.ravel()[:n]
     b = tok_pt.ravel()[:n]
     print(f"[Cossim] Tokens exact: {100.0 * float((a == b).mean()):.2f}%")
-
 
 if __name__ == "__main__":
     main()
