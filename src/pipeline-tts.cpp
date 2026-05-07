@@ -1,9 +1,9 @@
 // pipeline-tts.cpp: TTS pipeline orchestration.
 //
-// Phase 1 scope: load OmniVoiceLM weights onto the backend. Subsequent phases
-// append the custom embed graph, the audio_heads readout, the MaskGIT loop,
-// the prompt builder, and the audio_tokenizer decode. Each compute path
-// allocates its own ggml_gallocr at call time, mirroring pipeline-codec.
+// Loads the LLM weights, drives the custom embed graph, the audio_heads
+// readout, the MaskGIT iterative decoder, the prompt builder and the
+// audio tokenizer decode. Each compute path allocates its own
+// ggml_gallocr at call time, mirroring pipeline-codec.
 
 #include "pipeline-tts.h"
 
@@ -22,6 +22,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -68,6 +70,10 @@ bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp,
     // get_rows on CUDA) to the CPU backend. 8192 nodes covers the full
     // 28L Qwen3 graph with batched MaskGIT.
     pt->sched = backend_sched_new(bp, 8192);
+    if (!pt->sched) {
+        pipeline_tts_free(pt);
+        return false;
+    }
 
     return true;
 }
@@ -626,22 +632,51 @@ std::vector<int32_t> pipeline_tts_generate(PipelineTTS *         pt,
     return maskgit_generate(pt, &prompt, mg_cfg, T, dump_dir, ctr_lo_inout);
 }
 
-// Full TTS synthesis : tokens via pipeline_tts_generate, waveform via
-// pipeline_codec_decode. Refuses to decode partially decoded outputs.
-std::vector<float> pipeline_tts_synthesize(PipelineTTS *         pt,
-                                           PipelineCodec *       pc,
-                                           const BPETokenizer *  tok,
-                                           const std::string &   text,
-                                           const std::string &   lang,
-                                           const std::string &   instruct,
-                                           int                   T,
-                                           bool                  denoise,
-                                           const MaskgitConfig & mg_cfg,
-                                           const std::string &   ref_text,
-                                           const int32_t *       ref_audio_tokens,
-                                           int                   ref_T,
-                                           const char *          dump_dir,
-                                           uint32_t *            ctr_lo_inout) {
+// Cooperative cancel context threaded into the long-form helpers. cb is the
+// caller-provided poll function (or NULL when cancellation is disabled), ud
+// the user pointer it gets called with, and triggered an out flag set the
+// first time cb returns true. The helpers return an empty vector on cancel,
+// just like on any other failure ; the public entry inspects triggered to
+// distinguish OV_STATUS_CANCELLED from OV_STATUS_GENERATE_FAILED.
+struct tts_cancel {
+    bool (*cb)(void * ud);
+    void * ud;
+    bool   triggered;
+};
+
+static bool tts_should_cancel(tts_cancel * cc) {
+    if (!cc || !cc->cb) {
+        return false;
+    }
+    if (cc->triggered) {
+        return true;
+    }
+    if (cc->cb(cc->ud)) {
+        cc->triggered = true;
+        return true;
+    }
+    return false;
+}
+
+// Single-shot synthesis : pipeline_tts_generate followed by
+// pipeline_codec_decode. Refuses to decode if any audio_token equals
+// lm.audio_mask_id, which would corrupt the RVQ lookup. Used as a building
+// block by tts_synthesize_long_internal for chunk N >= 1 (and for the
+// single-shot fast path when chunking is bypassed).
+static std::vector<float> tts_synthesize_one_chunk(PipelineTTS *         pt,
+                                                   PipelineCodec *       pc,
+                                                   const BPETokenizer *  tok,
+                                                   const std::string &   text,
+                                                   const std::string &   lang,
+                                                   const std::string &   instruct,
+                                                   int                   T,
+                                                   bool                  denoise,
+                                                   const MaskgitConfig & mg_cfg,
+                                                   const std::string &   ref_text,
+                                                   const int32_t *       ref_audio_tokens,
+                                                   int                   ref_T,
+                                                   const char *          dump_dir,
+                                                   uint32_t *            ctr_lo_inout) {
     std::vector<int32_t> tokens = pipeline_tts_generate(pt, tok, text, lang, instruct, T, denoise, mg_cfg, ref_text,
                                                         ref_audio_tokens, ref_T, dump_dir, ctr_lo_inout);
     if (tokens.empty()) {
@@ -690,22 +725,29 @@ std::vector<float> pipeline_tts_synthesize(PipelineTTS *         pt,
 //   - cross-fade audio chunks
 //   - apply post-processing (remove_silence, peak/0.5 when no ext ref,
 //     fade_and_pad) on the merged waveform.
-std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
-                                                PipelineCodec *       pc,
-                                                const BPETokenizer *  tok,
-                                                const std::string &   text,
-                                                const std::string &   lang,
-                                                const std::string &   instruct,
-                                                int                   T_override,
-                                                float                 chunk_duration_sec,
-                                                float                 chunk_threshold_sec,
-                                                bool                  denoise,
-                                                const MaskgitConfig & mg_cfg,
-                                                const std::string &   ref_text,
-                                                const int32_t *       ext_ref_tokens,
-                                                int                   ext_ref_T,
-                                                float                 ref_rms,
-                                                const char *          dump_dir) {
+// ref_rms < 0 means no external reference -> peak/0.5 normalisation.
+// 0 <= ref_rms < 0.1 -> rescale output by ref_rms / 0.1 (quiet-ref branch).
+// ref_rms >= 0.1 -> no rescale.
+static std::vector<float> tts_synthesize_long_internal(PipelineTTS *         pt,
+                                                       PipelineCodec *       pc,
+                                                       const BPETokenizer *  tok,
+                                                       const std::string &   text,
+                                                       const std::string &   lang,
+                                                       const std::string &   instruct,
+                                                       int                   T_override,
+                                                       float                 chunk_duration_sec,
+                                                       float                 chunk_threshold_sec,
+                                                       bool                  denoise,
+                                                       const MaskgitConfig & mg_cfg,
+                                                       const std::string &   ref_text,
+                                                       const int32_t *       ext_ref_tokens,
+                                                       int                   ext_ref_T,
+                                                       float                 ref_rms,
+                                                       const char *          dump_dir,
+                                                       tts_cancel *          cc) {
+    if (tts_should_cancel(cc)) {
+        return {};
+    }
     const int sr         = pc->sample_rate;
     const int hop        = pc->hop_length;
     const int frame_rate = sr / hop;
@@ -729,8 +771,8 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
         fprintf(stderr, "[TTS-Long] Single-shot path: T=%d frames (%.2fs), threshold=%d frames\n", T_total,
                 (float) T_total / (float) frame_rate, threshold_frames);
 
-        audio = pipeline_tts_synthesize(pt, pc, tok, text, lang, instruct, T_total, denoise, mg_cfg, ref_text,
-                                        ext_ref_tokens, ext_ref_T, dump_dir, &shared_ctr_lo);
+        audio = tts_synthesize_one_chunk(pt, pc, tok, text, lang, instruct, T_total, denoise, mg_cfg, ref_text,
+                                         ext_ref_tokens, ext_ref_T, dump_dir, &shared_ctr_lo);
 
         if (audio.empty()) {
             return audio;
@@ -770,6 +812,10 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
         std::vector<int32_t> chunk0_tokens;
 
         for (size_t i = 0; i < chunks.size(); i++) {
+            if (tts_should_cancel(cc)) {
+                fprintf(stderr, "[TTS-Long] Cancelled at chunk %zu/%zu\n", i, chunks.size());
+                return {};
+            }
             const std::string & ct = chunks[i];
 
             // Chunk 0 in pure auto-voice runs without any reference. Every
@@ -813,10 +859,11 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
                     return {};
                 }
 
-                // Mirror the single-shot pipeline_tts_synthesize dumps for chunk 0
-                // so cossim tests see mg-tokens and decoded audio under the chunked
-                // path too. Higher chunks go through pipeline_tts_synthesize which
-                // already dumps these artefacts when chunk_dump_dir is non-null.
+                // Mirror the single-shot tts_synthesize_one_chunk dumps for
+                // chunk 0 so cossim tests see mg-tokens and decoded audio
+                // under the chunked path too. Higher chunks go through
+                // tts_synthesize_one_chunk which already dumps these
+                // artefacts when chunk_dump_dir is non-null.
                 if (chunk_dump_dir) {
                     DebugDumper dbg;
                     debug_init(&dbg, chunk_dump_dir);
@@ -832,8 +879,8 @@ std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
                 prompt_text   = ct;
             } else {
                 std::vector<float> a =
-                    pipeline_tts_synthesize(pt, pc, tok, ct, lang, instruct, Ti, denoise, mg_cfg, this_ref_text,
-                                            this_ref, this_T, chunk_dump_dir, &shared_ctr_lo);
+                    tts_synthesize_one_chunk(pt, pc, tok, ct, lang, instruct, Ti, denoise, mg_cfg, this_ref_text,
+                                             this_ref, this_T, chunk_dump_dir, &shared_ctr_lo);
                 if (a.empty()) {
                     fprintf(stderr, "[TTS-Long] FATAL: chunk %zu synthesize failed\n", i);
                     return {};
@@ -905,27 +952,33 @@ int pipeline_tts_duration_sec_to_tokens(const PipelineCodec * pc, float duration
     return T;
 }
 
-std::vector<float> pipeline_tts_synthesize_long_with_ref(PipelineTTS *         pt,
-                                                         PipelineCodec *       pc,
-                                                         const BPETokenizer *  tok,
-                                                         const std::string &   text,
-                                                         const std::string &   lang,
-                                                         const std::string &   instruct,
-                                                         int                   T_override,
-                                                         float                 chunk_duration_sec,
-                                                         float                 chunk_threshold_sec,
-                                                         bool                  denoise,
-                                                         bool                  preprocess_prompt,
-                                                         const MaskgitConfig & mg_cfg,
-                                                         const float *         ref_audio_24k,
-                                                         int                   ref_n_samples,
-                                                         const std::string &   ref_text_in,
-                                                         const char *          dump_dir) {
+// Encodes the optional raw reference waveform into RVQ codes (when present)
+// and dispatches to tts_synthesize_long_internal. Mirrors the upstream
+// reference preprocessing chain : RMS / auto-gain / add_punctuation /
+// silence-trim / hop alignment / codec encode. ref_audio_24k == NULL or
+// ref_n_samples <= 0 routes to the pure TTS path with ref_rms = -1.
+static std::vector<float> tts_encode_ref_and_synth(PipelineTTS *         pt,
+                                                   PipelineCodec *       pc,
+                                                   const BPETokenizer *  tok,
+                                                   const std::string &   text,
+                                                   const std::string &   lang,
+                                                   const std::string &   instruct,
+                                                   int                   T_override,
+                                                   float                 chunk_duration_sec,
+                                                   float                 chunk_threshold_sec,
+                                                   bool                  denoise,
+                                                   bool                  preprocess_prompt,
+                                                   const MaskgitConfig & mg_cfg,
+                                                   const float *         ref_audio_24k,
+                                                   int                   ref_n_samples,
+                                                   const std::string &   ref_text_in,
+                                                   const char *          dump_dir,
+                                                   tts_cancel *          cc) {
     // No reference : pure TTS path. ref_rms = -1 routes the post-proc volume
     // branch to peak / 0.5 normalisation.
     if (ref_audio_24k == NULL || ref_n_samples <= 0) {
-        return pipeline_tts_synthesize_long(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
-                                            chunk_threshold_sec, denoise, mg_cfg, "", NULL, 0, -1.0f, dump_dir);
+        return tts_synthesize_long_internal(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
+                                            chunk_threshold_sec, denoise, mg_cfg, "", NULL, 0, -1.0f, dump_dir, cc);
     }
 
     // Encode the optional reference WAV into ref_audio_tokens once, before
@@ -998,7 +1051,107 @@ std::vector<float> pipeline_tts_synthesize_long_with_ref(PipelineTTS *         p
         debug_dump_i32_as_f32(&dbg, "ref-audio-codes", ref_codes.data(), ref_shape, 2);
     }
 
-    return pipeline_tts_synthesize_long(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
+    return tts_synthesize_long_internal(pt, pc, tok, text, lang, instruct, T_override, chunk_duration_sec,
                                         chunk_threshold_sec, denoise, mg_cfg, ref_text, ref_codes.data(), ref_T,
-                                        ref_rms_for_postproc, dump_dir);
+                                        ref_rms_for_postproc, dump_dir, cc);
+}
+
+ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
+                                  PipelineCodec *       pc,
+                                  const BPETokenizer *  tok,
+                                  const VoiceDesign *   vd,
+                                  const ov_tts_params * params,
+                                  ov_audio *            out) {
+    if (!params || !out) {
+        return OV_STATUS_INVALID_PARAMS;
+    }
+
+    // Always start from a clean output slot. Failures below leave it empty
+    // so the caller can ov_audio_free unconditionally without surprise.
+    ov_audio_free(out);
+
+    // Reject ambiguous reference inputs : raw waveform and pre-encoded tokens
+    // are mutually exclusive. KISS, the caller is told immediately rather
+    // than picking a winner silently.
+    bool has_raw    = (params->ref_audio_24k != nullptr) && (params->ref_n_samples > 0);
+    bool has_tokens = (params->ref_audio_tokens != nullptr) && (params->ref_T > 0);
+    if (has_raw && has_tokens) {
+        fprintf(stderr, "[TTS] ERROR: ref_audio_24k and ref_audio_tokens are mutually exclusive\n");
+        return OV_STATUS_INVALID_PARAMS;
+    }
+
+    // Adapt the C-friendly NULL-able strings into std::string at the API
+    // boundary. The internal helpers stay idiomatic C++ underneath.
+    std::string text(params->text ? params->text : "");
+    std::string lang(params->lang ? params->lang : "");
+    std::string raw_instruct(params->instruct ? params->instruct : "");
+    std::string ref_text(params->ref_text ? params->ref_text : "");
+
+    // Resolve the raw instruct against the voice-design vocabulary. The
+    // target language is selected from the synthesis text : any CJK ideograph
+    // -> Chinese, otherwise English.
+    std::string instruct;
+    if (!pipeline_tts_resolve_instruct(vd, text, raw_instruct, &instruct)) {
+        return OV_STATUS_INSTRUCT_INVALID;
+    }
+
+    // Reconstruct the MaskGIT sampler config from the flat fields. This is
+    // the single conversion site between the C-flat representation in the
+    // public API and the C++ struct used by the internal helpers.
+    MaskgitConfig mg_cfg;
+    mg_cfg.num_step             = params->mg_num_step;
+    mg_cfg.guidance_scale       = params->mg_guidance_scale;
+    mg_cfg.t_shift              = params->mg_t_shift;
+    mg_cfg.layer_penalty_factor = params->mg_layer_penalty_factor;
+    mg_cfg.position_temperature = params->mg_position_temperature;
+    mg_cfg.class_temperature    = params->mg_class_temperature;
+    mg_cfg.seed                 = params->mg_seed;
+
+    // Cancel context threaded into the long-form helpers. NULL callback
+    // disables polling ; triggered starts at false and flips on the first
+    // poll that returns true.
+    tts_cancel cc = { params->cancel, params->cancel_user_data, false };
+
+    std::vector<float> audio;
+    if (has_raw) {
+        // Raw reference path : encode the waveform once, then run the
+        // long-form pipeline with the resulting [K, ref_T] tokens and the
+        // original ref_rms threaded into post-proc.
+        audio =
+            tts_encode_ref_and_synth(pt, pc, tok, text, lang, instruct, params->T_override, params->chunk_duration_sec,
+                                     params->chunk_threshold_sec, params->denoise, params->preprocess_prompt, mg_cfg,
+                                     params->ref_audio_24k, params->ref_n_samples, ref_text, params->dump_dir, &cc);
+    } else {
+        // Pre-encoded reference or pure TTS path. ref_rms = -1 routes the
+        // post-proc volume branch to peak / 0.5 normalisation, matching the
+        // no-ref branch upstream when no external reference is supplied.
+        audio = tts_synthesize_long_internal(pt, pc, tok, text, lang, instruct, params->T_override,
+                                             params->chunk_duration_sec, params->chunk_threshold_sec, params->denoise,
+                                             mg_cfg, ref_text, has_tokens ? params->ref_audio_tokens : nullptr,
+                                             has_tokens ? params->ref_T : 0, -1.0f, params->dump_dir, &cc);
+    }
+
+    if (cc.triggered) {
+        return OV_STATUS_CANCELLED;
+    }
+    if (audio.empty()) {
+        return OV_STATUS_GENERATE_FAILED;
+    }
+
+    // Copy the heap-owned waveform into the C-friendly output struct. malloc
+    // (not new) so C bindings free the buffer without linking the C++
+    // runtime.
+    size_t  bytes   = audio.size() * sizeof(float);
+    float * samples = (float *) malloc(bytes);
+    if (!samples) {
+        fprintf(stderr, "[TTS] ERROR: malloc failed for %zu bytes of output audio\n", bytes);
+        return OV_STATUS_OOM;
+    }
+    memcpy(samples, audio.data(), bytes);
+
+    out->samples     = samples;
+    out->n_samples   = (int) audio.size();
+    out->sample_rate = pc->sample_rate;
+    out->channels    = 1;
+    return OV_STATUS_OK;
 }

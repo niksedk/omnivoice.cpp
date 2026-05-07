@@ -11,6 +11,7 @@
 #include "bpe.h"
 #include "duration-estimator.h"
 #include "maskgit-tts.h"
+#include "omnivoice.h"
 #include "pipeline-codec.h"
 #include "pipeline-tts.h"
 #include "version.h"
@@ -181,6 +182,108 @@ static bool load_omnivoice_tokenizer(BPETokenizer * tok, const char * gguf_path)
     return load_bpe_from_gguf(tok, gguf_path) && bpe_load_omnivoice_specials(tok, gguf_path);
 }
 
+// Full TTS synthesis path via the OmniVoice handle. Lives outside main so the
+// debug paths (--llm-test, --maskgit-test) keep their lower-level init flow
+// completely untouched.
+static int run_tts_via_ov(const char * model_path,
+                          const char * codec_path,
+                          bool         use_fa,
+                          bool         clamp_fp16,
+                          const char * ref_wav_path,
+                          const char * ref_text_path,
+                          const char * prompt_lang,
+                          const char * prompt_instruct,
+                          float        prompt_duration_sec,
+                          bool         prompt_denoise,
+                          bool         preprocess_prompt,
+                          float        chunk_duration_sec,
+                          float        chunk_threshold_sec,
+                          uint64_t     seed_resolved,
+                          const char * dump_dir,
+                          const char * output_path,
+                          WavFormat    wav_fmt) {
+    ov_init_params iparams;
+    ov_init_default_params(&iparams);
+    iparams.model_path = model_path;
+    iparams.codec_path = codec_path;
+    iparams.use_fa     = use_fa;
+    iparams.clamp_fp16 = clamp_fp16;
+
+    OmniVoice * ov = ov_init(&iparams);
+    if (!ov) {
+        return 1;
+    }
+
+    int rc = 0;
+
+    // Optional reference WAV. The handle takes the raw mono 24 kHz buffer ;
+    // every preprocessing step (RMS, auto-gain, add_punctuation, silence
+    // trim, hop alignment, codec encode) runs inside ov_synthesize.
+    std::vector<float> ref_audio;
+    std::string        ref_text;
+    if (ref_wav_path) {
+        fprintf(stderr, "[CLI] Reference WAV: %s\n", ref_wav_path);
+        if (!read_text_file(ref_text_path, ref_text)) {
+            ov_free(ov);
+            return 1;
+        }
+        int     n_samples = 0;
+        float * raw       = audio_read_mono(ref_wav_path, 24000, &n_samples);
+        if (!raw || n_samples <= 0) {
+            fprintf(stderr, "[OmniVoice-TTS] FATAL: failed to load %s\n", ref_wav_path);
+            ov_free(ov);
+            return 1;
+        }
+        ref_audio.assign(raw, raw + n_samples);
+        free(raw);
+    }
+
+    std::string text = read_stdin_text();
+    std::string lang = prompt_lang ? prompt_lang : "";
+
+    // Resolve target frame count override from --duration. When unset, the
+    // synthesis pipeline estimates internally and may activate long-form
+    // chunking. An explicit value forces the single-shot path with that
+    // exact frame count.
+    int T_override = 0;
+    if (prompt_duration_sec > 0.0f) {
+        T_override = ov_duration_sec_to_tokens(ov, prompt_duration_sec);
+    }
+
+    // Defaults mirror OmniVoiceGenerationConfig (Python) : num_step=32,
+    // guidance_scale=2.0, t_shift=0.1, layer_penalty_factor=5.0,
+    // position_temperature=5.0, class_temperature=0.0. ov_tts_default_params
+    // sets the lot ; the CLI seed lands on mg_seed below.
+    ov_tts_params params;
+    ov_tts_default_params(&params);
+    params.text                = text.c_str();
+    params.lang                = lang.c_str();
+    params.instruct            = prompt_instruct ? prompt_instruct : "";
+    params.T_override          = T_override;
+    params.chunk_duration_sec  = chunk_duration_sec;
+    params.chunk_threshold_sec = chunk_threshold_sec;
+    params.denoise             = prompt_denoise;
+    params.preprocess_prompt   = preprocess_prompt;
+    params.mg_seed             = seed_resolved;
+    params.ref_audio_24k       = ref_audio.empty() ? nullptr : ref_audio.data();
+    params.ref_n_samples       = (int) ref_audio.size();
+    params.ref_text            = ref_text.c_str();
+    params.dump_dir            = dump_dir;
+
+    ov_audio audio = {};
+    if (ov_synthesize(ov, &params, &audio) != OV_STATUS_OK) {
+        rc = 1;
+    } else if (!audio_write_wav(output_path, audio.samples, audio.n_samples, audio.sample_rate, wav_fmt)) {
+        rc = 1;
+    } else {
+        fprintf(stderr, "[OmniVoice-TTS] TTS: wrote %s (%d samples @ %d Hz, %.2f s)\n", output_path, audio.n_samples,
+                audio.sample_rate, (double) audio.n_samples / (double) audio.sample_rate);
+    }
+    ov_audio_free(&audio);
+    ov_free(ov);
+    return rc;
+}
+
 int main(int argc, char ** argv) {
     if (argc <= 1) {
         print_usage(argv[0]);
@@ -300,7 +403,18 @@ int main(int argc, char ** argv) {
     uint64_t seed_resolved = (seed_arg < 0) ? (uint64_t) std::random_device{}() : (uint64_t) seed_arg;
     fprintf(stderr, "[CLI] Seed: %llu%s\n", (unsigned long long) seed_resolved, (seed_arg < 0) ? " (random)" : "");
 
+    // TTS mode runs through the OmniVoice handle. Debug modes (--llm-test,
+    // --maskgit-test) keep their lower-level init flow below.
+    if (tts_mode) {
+        return run_tts_via_ov(model_path, codec_path, use_fa, clamp_fp16, ref_wav_path, ref_text_path, prompt_lang,
+                              prompt_instruct, prompt_duration_sec, prompt_denoise, preprocess_prompt,
+                              chunk_duration_sec, chunk_threshold_sec, seed_resolved, dump_dir, output_path, wav_fmt);
+    }
+
     BackendPair bp = backend_init("LM");
+    if (!bp.backend) {
+        return 1;
+    }
 
     PipelineTTS pt = {};
     if (!pipeline_tts_load(&pt, model_path, bp, use_fa, clamp_fp16)) {
@@ -377,87 +491,9 @@ int main(int argc, char ** argv) {
                 }
             }
         }
-    } else {
-        BPETokenizer  tok          = {};
-        PipelineCodec pc           = {};
-        bool          codec_loaded = false;
 
-        if (!load_omnivoice_tokenizer(&tok, model_path)) {
-            rc = 1;
-        } else if (!pipeline_codec_load(&pc, codec_path, bp)) {
-            rc = 1;
-        } else {
-            codec_loaded = true;
-
-            // Optional reference WAV : the tool only reads the raw mono
-            // 24 kHz buffer here. All preprocessing (RMS, auto-gain,
-            // add_punctuation, silence-trim, hop alignment, codec encode)
-            // runs inside pipeline_tts_synthesize_long_with_ref.
-            std::vector<float> ref_audio;
-            std::string        ref_text;
-            if (ref_wav_path) {
-                fprintf(stderr, "[CLI] Reference WAV: %s\n", ref_wav_path);
-                if (!read_text_file(ref_text_path, ref_text)) {
-                    rc = 1;
-                } else {
-                    int     n_samples = 0;
-                    float * raw       = audio_read_mono(ref_wav_path, 24000, &n_samples);
-                    if (!raw || n_samples <= 0) {
-                        fprintf(stderr, "[OmniVoice-TTS] FATAL: failed to load %s\n", ref_wav_path);
-                        rc = 1;
-                    } else {
-                        ref_audio.assign(raw, raw + n_samples);
-                        free(raw);
-                    }
-                }
-            }
-
-            if (rc == 0) {
-                // Defaults mirror OmniVoiceGenerationConfig (Python) :
-                // num_step=32, guidance_scale=2.0, t_shift=0.1,
-                // layer_penalty_factor=5.0, position_temperature=5.0,
-                // class_temperature=0.0. The seed is plumbed from the CLI.
-                MaskgitConfig mg_cfg = {};
-                mg_cfg.seed          = seed_resolved;
-
-                std::string text         = read_stdin_text();
-                std::string lang         = prompt_lang ? prompt_lang : "";
-                std::string raw_instruct = prompt_instruct ? prompt_instruct : "";
-                std::string instruct;
-                if (!pipeline_tts_resolve_instruct(&vd, text, raw_instruct, &instruct)) {
-                    rc = 1;
-                } else {
-                    // Resolve target frame count override from --duration. When
-                    // unset, pipeline_tts_synthesize_long estimates internally
-                    // and may activate long-form chunking. An explicit value
-                    // forces the single-shot path with that exact frame count.
-                    int T_override = 0;
-                    if (prompt_duration_sec > 0.0f) {
-                        T_override = pipeline_tts_duration_sec_to_tokens(&pc, prompt_duration_sec);
-                    }
-
-                    std::vector<float> audio = pipeline_tts_synthesize_long_with_ref(
-                        &pt, &pc, &tok, text, lang, instruct, T_override, chunk_duration_sec, chunk_threshold_sec,
-                        prompt_denoise, preprocess_prompt, mg_cfg, ref_audio.empty() ? NULL : ref_audio.data(),
-                        (int) ref_audio.size(), ref_text, dump_dir);
-                    if (audio.empty()) {
-                        rc = 1;
-                    } else if (!audio_write_wav(output_path, audio.data(), (int) audio.size(), pc.sample_rate,
-                                                wav_fmt)) {
-                        rc = 1;
-                    } else {
-                        fprintf(stderr, "[OmniVoice-TTS] TTS: wrote %s (%d samples @ %d Hz, %.2f s)\n", output_path,
-                                (int) audio.size(), pc.sample_rate, (double) audio.size() / (double) pc.sample_rate);
-                    }
-                }
-            }
-        }
-        if (codec_loaded) {
-            pipeline_codec_free(&pc);
-        }
+        pipeline_tts_free(&pt);
+        backend_release(bp.backend, bp.cpu_backend);
+        return rc;
     }
-
-    pipeline_tts_free(&pt);
-    backend_release(bp.backend, bp.cpu_backend);
-    return rc;
 }

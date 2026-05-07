@@ -9,6 +9,7 @@
 #include "backend.h"
 #include "ggml-backend.h"
 #include "omnivoice-llm.h"
+#include "omnivoice.h"
 #include "weight-ctx.h"
 
 #include <cstdint>
@@ -116,14 +117,17 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
                                                     int                       T_audio         = 0,
                                                     const char *              dump_hidden_dir = nullptr);
 
-// Public TTS entry : tokenize text, build prompt + CFG batch, run the MaskGIT
-// iterative decoder. Returns flat audio_tokens of size K * T (k slow, t fast)
-// or an empty vector on failure. ref_text and ref_audio_tokens enable the
-// voice cloning path : when ref_audio_tokens is non-NULL it must point to
-// ref_T audio frames laid out [K, ref_T] and ref_text should hold the
-// transcript (concatenated to text via _combine_text). Pass NULL / 0 / ""
-// for the pure TTS path. The denoise flag triggers the <|denoise|> marker
-// only when ref_audio_tokens is non-NULL, matching the reference.
+// Low-level token generator : tokenize text, build prompt + CFG batch, run
+// the MaskGIT iterative decoder. Returns flat audio_tokens of size K * T (k
+// slow, t fast) or an empty vector on failure. ref_text and ref_audio_tokens
+// enable the voice cloning path : when ref_audio_tokens is non-NULL it must
+// point to ref_T audio frames laid out [K, ref_T] and ref_text should hold
+// the transcript (concatenated to text via _combine_text). Pass NULL / 0 /
+// ""  for the pure TTS path. The denoise flag triggers the <|denoise|>
+// marker only when ref_audio_tokens is non-NULL, matching the reference.
+// instruct must already be resolved against the VoiceDesign vocabulary, see
+// pipeline_tts_resolve_instruct. Used by the --maskgit-test debug path and
+// internally by pipeline_tts_synthesize.
 std::vector<int32_t> pipeline_tts_generate(PipelineTTS *         pt,
                                            const BPETokenizer *  tok,
                                            const std::string &   text,
@@ -138,63 +142,11 @@ std::vector<int32_t> pipeline_tts_generate(PipelineTTS *         pt,
                                            const char *          dump_dir,
                                            uint32_t *            ctr_lo_inout = nullptr);
 
-// Full TTS synthesis : pipeline_tts_generate followed by pipeline_codec_decode.
-// Returns mono waveform at 24 kHz of length T * codec.hop_length, empty on
-// failure. Refuses to decode if any audio_token equals lm.audio_mask_id, which
-// would corrupt the RVQ lookup. ref_text and ref_audio_tokens follow the same
-// convention as pipeline_tts_generate. ctr_lo_inout threads the Philox counter
-// across calls when chunking, see maskgit_generate.
-std::vector<float> pipeline_tts_synthesize(PipelineTTS *         pt,
-                                           PipelineCodec *       pc,
-                                           const BPETokenizer *  tok,
-                                           const std::string &   text,
-                                           const std::string &   lang,
-                                           const std::string &   instruct,
-                                           int                   T,
-                                           bool                  denoise,
-                                           const MaskgitConfig & mg_cfg,
-                                           const std::string &   ref_text,
-                                           const int32_t *       ref_audio_tokens,
-                                           int                   ref_T,
-                                           const char *          dump_dir,
-                                           uint32_t *            ctr_lo_inout = nullptr);
-
-// Long-form TTS with automatic chunking and post-processing. If
-// chunk_duration_sec <= 0 or the estimated audio length fits below
-// chunk_threshold_sec, behaves as a single pipeline_tts_synthesize call. For
-// longer text, splits on punctuation via chunk_text_punctuation, generates
-// chunk 0 with no reference, then uses chunk 0 audio tokens as voice prompt
-// for chunks 1..N (matching the no-ref branch of _generate_chunked in
-// omnivoice.py). Cross-fades chunks, applies remove_silence + final volume
-// adjustment + fade_and_pad. Returns mono float PCM at the codec sample rate
-// (24 kHz). External voice cloning via ref_audio_tokens propagates to every
-// chunk identically (matching the all-have-ref branch upstream).
-// T_override > 0 forces the single-shot path with that exact frame count,
-// bypassing the duration estimator and the chunker. Use 0 for auto.
-// ref_rms < 0 means no external reference -> apply peak/0.5 normalisation.
-// 0 <= ref_rms < 0.1 -> rescale output audio by ref_rms / 0.1 (matches the
-// quiet-ref branch of _post_process_audio). ref_rms >= 0.1 -> no rescale.
-std::vector<float> pipeline_tts_synthesize_long(PipelineTTS *         pt,
-                                                PipelineCodec *       pc,
-                                                const BPETokenizer *  tok,
-                                                const std::string &   text,
-                                                const std::string &   lang,
-                                                const std::string &   instruct,
-                                                int                   T_override,
-                                                float                 chunk_duration_sec,
-                                                float                 chunk_threshold_sec,
-                                                bool                  denoise,
-                                                const MaskgitConfig & mg_cfg,
-                                                const std::string &   ref_text,
-                                                const int32_t *       ext_ref_tokens,
-                                                int                   ext_ref_T,
-                                                float                 ref_rms,
-                                                const char *          dump_dir);
-
 // Validate and normalise the raw instruct string against the voice-design
 // vocabulary. The target language is selected from the synthesis text : any
 // CJK ideograph in text -> Chinese, otherwise English. On error, prints a
-// "[TTS] ERROR: ..." line and returns false.
+// "[TTS] ERROR: ..." line and returns false. Bypassed by callers that go
+// through pipeline_tts_synthesize, which resolves the instruct internally.
 bool pipeline_tts_resolve_instruct(const VoiceDesign * vd,
                                    const std::string & text,
                                    const std::string & raw,
@@ -205,30 +157,22 @@ bool pipeline_tts_resolve_instruct(const VoiceDesign * vd,
 // of truth shared by every CLI / API entry that exposes --duration.
 int pipeline_tts_duration_sec_to_tokens(const PipelineCodec * pc, float duration_sec);
 
-// Voice cloning entry point : takes raw mono 24 kHz reference audio plus its
-// transcript, runs the full reference preprocessing chain (ref_rms /
-// auto-gain / add_punctuation / silence-trim / hop alignment / codec encode)
-// then dispatches to pipeline_tts_synthesize_long with the encoded ref tokens
-// and the original ref_rms threaded into post-proc. ref_audio_24k == NULL or
-// ref_n_samples <= 0 routes to the pure TTS path with ref_rms = -1, matching
-// the no-ref branch upstream. preprocess_prompt mirrors the Python flag :
-// when true, applies add_punctuation to ref_text and remove_silence
-// (mid=200ms, lead=100ms, trail=200ms, threshold=-50 dBFS) to the ref
-// waveform before encoding. Returns mono float PCM at the codec sample rate
-// (24 kHz), empty on failure.
-std::vector<float> pipeline_tts_synthesize_long_with_ref(PipelineTTS *         pt,
-                                                         PipelineCodec *       pc,
-                                                         const BPETokenizer *  tok,
-                                                         const std::string &   text,
-                                                         const std::string &   lang,
-                                                         const std::string &   instruct,
-                                                         int                   T_override,
-                                                         float                 chunk_duration_sec,
-                                                         float                 chunk_threshold_sec,
-                                                         bool                  denoise,
-                                                         bool                  preprocess_prompt,
-                                                         const MaskgitConfig & mg_cfg,
-                                                         const float *         ref_audio_24k,
-                                                         int                   ref_n_samples,
-                                                         const std::string &   ref_text,
-                                                         const char *          dump_dir);
+// Public TTS synthesis entry. Resolves the instruct string against vd, picks
+// between the single-shot, chunked auto-voice and voice-cloning paths from
+// the params struct, and fills `out` with mono float PCM at the codec sample
+// rate (24 kHz). Returns OV_STATUS_OK on success ; on failure returns a
+// negative ov_status describing the cause and leaves out empty. The whole
+// pipeline mirrors _post_process_audio in omnivoice.py : when no reference
+// audio is provided the output is peak/0.5 normalised, when a reference is
+// provided its original RMS is threaded into post-proc to rescale the output
+// back to reference loudness.
+//
+// The ov_tts_params struct, the ov_audio struct, the ov_status enum and the
+// ov_audio_free entry are declared in omnivoice.h ; this entry consumes them
+// directly.
+ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
+                                  PipelineCodec *       pc,
+                                  const BPETokenizer *  tok,
+                                  const VoiceDesign *   vd,
+                                  const ov_tts_params * params,
+                                  ov_audio *            out);

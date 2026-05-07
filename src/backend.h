@@ -62,7 +62,9 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
 // pick the best one, keep CPU as fallback.
 // label: log prefix, e.g. "DiT", "VAE", "LM"
-// Subsequent calls reuse the same backend (single VMM pool).
+// Subsequent calls reuse the same backend (single VMM pool). Returns a
+// BackendPair with .backend == NULL when initialisation fails ; the caller
+// must check this before passing it to any pipeline_*_load.
 static BackendPair backend_init(const char * label) {
     if (g_backend_refs > 0) {
         g_backend_refs++;
@@ -79,19 +81,19 @@ static BackendPair backend_init(const char * label) {
     if (force_backend) {
         bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
         if (!bp.backend) {
-            fprintf(stderr, "[Load] FATAL: GGML_BACKEND=%s not found. Available:", force_backend);
+            fprintf(stderr, "[Load] ERROR: GGML_BACKEND=%s not found. Available:", force_backend);
             for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
                 fprintf(stderr, " %s", ggml_backend_dev_name(ggml_backend_dev_get(i)));
             }
             fprintf(stderr, "\n");
-            exit(1);
+            return BackendPair{};
         }
     } else {
         bp.backend = ggml_backend_init_best();
     }
     if (!bp.backend) {
-        fprintf(stderr, "[Load] FATAL: no backend available\n");
-        exit(1);
+        fprintf(stderr, "[Load] ERROR: no backend available\n");
+        return BackendPair{};
     }
     bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
     int  n_threads   = backend_cpu_n_threads();
@@ -103,8 +105,11 @@ static BackendPair backend_init(const char * label) {
         bp.cpu_backend = cpu_backend_new(n_threads);
     }
     if (!bp.cpu_backend) {
-        fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
-        exit(1);
+        fprintf(stderr, "[Load] ERROR: failed to init CPU backend\n");
+        if (bp.backend && bp.backend != bp.cpu_backend) {
+            ggml_backend_free(bp.backend);
+        }
+        return BackendPair{};
     }
     bp.has_gpu = !best_is_cpu;
     fprintf(stderr, "[Load] %s backend: %s (CPU threads: %d)\n", label, ggml_backend_name(bp.backend), n_threads);
@@ -150,8 +155,8 @@ static ggml_backend_sched_t backend_sched_new(BackendPair bp, int max_nodes) {
 
     ggml_backend_sched_t sched = ggml_backend_sched_new(backends, bufts, n, max_nodes, false, true);
     if (!sched) {
-        fprintf(stderr, "[Load] FATAL: failed to create scheduler\n");
-        exit(1);
+        fprintf(stderr, "[Load] ERROR: failed to create scheduler\n");
+        return nullptr;
     }
     return sched;
 }

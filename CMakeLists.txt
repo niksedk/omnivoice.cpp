@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(omnivoice-ggml LANGUAGES C CXX)
+project(omnivoice-ggml VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,13 +86,64 @@ macro(link_ggml_backends target)
     add_dependencies(${target} version)
 endmacro()
 
-# Core library shared between binaries. Sources are added incrementally as
-# modules land. Phase 2.2 : pipeline-codec only. Future phases append more.
+# Core library shared between binaries. STATIC by default, SHARED when
+# BUILD_SHARED_LIBS=ON is passed at configure time. The OMNIVOICE_BUILD
+# define enables OV_API as dllexport on Windows / default-visibility on
+# GCC ; downstream targets that include omnivoice.h see dllimport on
+# Windows / default empty on GCC, both correct.
+# Core library shared between binaries. Always STATIC : the bundled CLI
+# tools include pipeline-tts.h / pipeline-codec.h / backend.h directly
+# for the debug paths (--llm-test, --maskgit-test) and need every
+# pipeline_* / backend_* symbol resolved without going through the public
+# ABI. The shared library for ABI consumers is a separate, opt-in target
+# below.
 add_library(omnivoice-core STATIC
+    src/omnivoice.cpp
     src/pipeline-codec.cpp
     src/pipeline-tts.cpp
 )
+target_compile_definitions(omnivoice-core PRIVATE OMNIVOICE_BUILD)
 link_ggml_backends(omnivoice-core)
+
+# Public shared library for ABI consumers (Python ctypes, Rust bindgen,
+# Go cgo). Opt-in : -DOMNIVOICE_SHARED=ON at configure time. Exports
+# only the OV_API-marked symbols ; every internal pipeline_* / backend_*
+# stays hidden inside the .so. Intentionally a different target name
+# from omnivoice-core so the static path used by the tools is never
+# affected.
+option(OMNIVOICE_SHARED "Build the shared omnivoice library for ABI consumers" OFF)
+if(OMNIVOICE_SHARED)
+    add_library(omnivoice SHARED
+        src/omnivoice.cpp
+        src/pipeline-codec.cpp
+        src/pipeline-tts.cpp
+    )
+    target_compile_definitions(omnivoice PRIVATE OMNIVOICE_BUILD)
+    set_target_properties(omnivoice PROPERTIES
+        C_VISIBILITY_PRESET       hidden
+        CXX_VISIBILITY_PRESET     hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        SOVERSION                 ${PROJECT_VERSION_MAJOR}
+    )
+    link_ggml_backends(omnivoice)
+endif()
+
+# Install rules. Public header + library go to the standard prefix
+# layout so downstream consumers can find them via -I and -l.
+include(GNUInstallDirs)
+install(TARGETS omnivoice-core
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+if(OMNIVOICE_SHARED)
+    install(TARGETS omnivoice
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+install(FILES src/omnivoice.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # quantize: GGUF requantizer (BF16 -> K-quants), shared with acestep.cpp policy
 add_executable(quantize tools/quantize.cpp)
@@ -107,4 +158,23 @@ link_ggml_backends(omnivoice-codec)
 add_executable(omnivoice-tts tools/omnivoice-tts.cpp)
 target_link_libraries(omnivoice-tts PRIVATE omnivoice-core)
 link_ggml_backends(omnivoice-tts)
+
+# test-abi-c : pure C99 smoke test that locks in the public ABI contract.
+# Compiles omnivoice.h with a C compiler under -Wall -Werror -pedantic and
+# links against the static lib. The test never loads a model ; failure
+# means the public API regressed. Built by default so a regression breaks
+# the main build, not just an opt-in target.
+add_executable(test-abi-c tests/abi-c.c)
+set_target_properties(test-abi-c PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+)
+target_compile_options(test-abi-c PRIVATE -Wall -Werror -pedantic)
+target_include_directories(test-abi-c PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}
+)
+target_link_libraries(test-abi-c PRIVATE omnivoice-core)
+link_ggml_backends(test-abi-c)
 

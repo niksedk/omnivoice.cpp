@@ -199,6 +199,9 @@ int main(int argc, char ** argv) {
     const std::string out_str = (mode == 1) ? swap_ext(input_path, ".rvq") : swap_ext(input_path, ".wav");
 
     BackendPair bp = backend_init("Codec");
+    if (!bp.backend) {
+        return 1;
+    }
 
     PipelineCodec pc = {};
     if (!pipeline_codec_load(&pc, model_path, bp)) {

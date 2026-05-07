@@ -6,7 +6,7 @@ Inputs (relative to CWD = tests/) :
     ../examples/freeman.txt      transcript of the cloning reference
     ../examples/freeman.wav      cloning reference audio, any rate, any layout
 
-Both sides run with seed=42, F32 weights, language=French, no pre or post
+Both sides run with seed=42, F32 weights, language=English, no pre or post
 process. The reference audio is resampled to 24 kHz mono inside both
 pipelines.
 

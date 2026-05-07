@@ -556,6 +556,104 @@ voice cloning    --ref-wav and --ref-text provided. The reference is
                    sets the target loudness.
 ```
 
+## Public API
+
+Two layers, picked by use case.
+
+### Top-level public ABI : src/omnivoice.h
+
+Single-header, plain C99, linkage `extern "C"`. The opaque `OmniVoice`
+handle aggregates the GGML backend pair, the LM pipeline, the audio
+tokenizer codec, the BPE tokenizer and the voice-design vocabulary.
+One init, one free, one synthesize call covers the full TTS path.
+Same names, same struct layout, same calling convention from C, C++,
+Python ctypes, Rust bindgen, Go cgo or any other binding generator.
+
+```c
+#include "omnivoice.h"
+
+struct ov_init_params iparams;
+ov_init_default_params(&iparams);
+iparams.model_path = "models/omnivoice-base-Q8_0.gguf";
+iparams.codec_path = "models/omnivoice-tokenizer-F32.gguf";
+
+struct OmniVoice * ov = ov_init(&iparams);
+
+struct ov_tts_params params;
+ov_tts_default_params(&params);
+params.text = "Hello world.";
+params.lang = "English";
+
+struct ov_audio audio = { 0 };
+enum ov_status rc = ov_synthesize(ov, &params, &audio);
+if (rc == OV_STATUS_OK) {
+    /* audio.samples is a malloc'd buffer of audio.n_samples floats
+       at audio.sample_rate Hz, audio.channels = 1 (mono) */
+}
+ov_audio_free(&audio);
+ov_free(ov);
+```
+
+Status codes :
+
+```
+OV_STATUS_OK                 0
+OV_STATUS_INVALID_PARAMS    -1   (mutually exclusive ref inputs etc.)
+OV_STATUS_INSTRUCT_INVALID  -2   (instruct rejected by VoiceDesign)
+OV_STATUS_GENERATE_FAILED   -3   (any internal generate / decode fail)
+OV_STATUS_OOM               -4   (output samples allocation failed)
+OV_STATUS_CANCELLED         -5   (cancel callback returned true)
+```
+
+`ov_tts_params` exposes `cancel` and `cancel_user_data`. The pipeline
+polls between chunks of long-form output, so cancel granularity is
+roughly `chunk_duration_sec` (15 s by default).
+
+The MaskGIT sampler config is flattened directly into `ov_tts_params`
+as seven `mg_*` fields ; `ov_tts_default_params` initialises them to
+the reference defaults (`num_step=32, guidance_scale=2.0, t_shift=0.1,
+layer_penalty_factor=5.0, position_temperature=5.0,
+class_temperature=0.0, seed=42`).
+
+`ov_version()` returns a static string of the form
+`"MAJOR.MINOR.PATCH (git-hash, date)"`. The macros `OV_VERSION_MAJOR`,
+`OV_VERSION_MINOR`, `OV_VERSION_PATCH` are also available at
+compile time for feature-detection.
+
+### ABI guarantee
+
+`tests/abi-c.c` is built on every build with
+`-std=c99 -Wall -Werror -pedantic`. It includes the public header,
+calls every entry through its early-return path, and is wired into
+the default build target. Any regression that breaks plain C
+consumability fails the main build, not an opt-in step.
+
+The static library `libomnivoice-core.a` is the default build
+artefact. For binding consumers, configure with
+`-DOMNIVOICE_SHARED=ON` to add a `libomnivoice.so` (or `.dll` /
+`.dylib`) shared target that exports only the `ov_*` symbols ;
+every internal `pipeline_*` and `backend_*` stays hidden behind
+`-fvisibility=hidden`. Install rules follow `GNUInstallDirs`.
+
+### Low-level API : src/pipeline-tts.h, src/pipeline-codec.h
+
+Direct access to the LM forward (`pipeline_tts_llm_forward`,
+`pipeline_tts_llm_forward_batched`), the MaskGIT-only path
+(`pipeline_tts_generate`), the codec encode / decode
+(`pipeline_codec_encode`, `pipeline_codec_decode`), the instruct
+resolver (`pipeline_tts_resolve_instruct`) and the manual init / free
+(`pipeline_tts_load`, `pipeline_codec_load`, `backend_init`).
+
+Used by `--llm-test` and `--maskgit-test` in `omnivoice-tts`, by
+`omnivoice-codec` for the standalone codec roundtrip, and by the
+Python cossim harness through dump files.
+
+This layer is intentionally not part of the public ABI (C++ types in
+the signatures, no visibility export). It exists for the in-tree
+debug paths and stays available as long as the bundled CLI tools
+need it. The handle layer above is the recommended entry for
+everything else.
+
 ## CLI tools
 
 ### omnivoice-tts
@@ -676,7 +774,12 @@ src/
                        in greedy mode
 
   pipeline-codec.{h,cpp} Audio tokenizer end-to-end (encode and decode)
-  pipeline-tts.{h,cpp}   Full TTS orchestration, single shot and chunked
+  pipeline-tts.{h,cpp}   Full TTS orchestration, single shot and chunked,
+                         plus low-level entries kept available for the
+                         debug paths and the cossim test harness
+  omnivoice.{h,cpp}      Public ABI : opaque OmniVoice handle, plain C99
+                         header in extern "C", consumable from C, C++,
+                         Python ctypes, Rust bindgen, Go cgo
 
 tools/
   omnivoice-tts.cpp    CLI : text to WAV (auto / design / clone)
@@ -690,9 +793,12 @@ tests/
   debug-clone-cossim.py   Same, voice cloning path
   cross-decode.py         Cross check : decode C++ tokens through PyTorch
                           codec and vice versa
-  prompt.txt              Long-form French TTS sample
+  prompt.txt              Long-form English TTS sample
   ref-audio.wav           Voice cloning reference clip
   ref-text.txt            Transcript matching ref-audio.wav
+  abi-c.c                 Plain C99 smoke test for the public ABI ; built
+                          with -Wall -Werror -pedantic on every build,
+                          locks in C consumability and symbol linkage
 ```
 
 ## GGML conventions
@@ -745,7 +851,7 @@ The reference comparison harness is `tests/debug-tts-cossim.py` and
 `tests/debug-clone-cossim.py`. They run the same input through the
 PyTorch reference (with TF32 disabled, eager attention) and through the
 C++ binary, dump each pipeline stage to disk, and report cosine
-similarity per stage. Latest run, chunked path, French long-form
+similarity per stage. Latest run, chunked path, English long-form
 prompt :
 
 ```

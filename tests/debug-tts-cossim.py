@@ -5,7 +5,7 @@ Inputs (relative to CWD = tests/) :
     ../examples/prompt.txt       target text fed to both pipelines
 
 Both sides run with :
-    instruct=male, language=French, seed=42, F32 weights, no pre or post
+    instruct=male, language=English, seed=42, F32 weights, no pre or post
     process. Defaults match : num_step=32, guidance_scale=2.0, t_shift=0.1,
     layer_penalty_factor=5.0, position_temperature=5.0, class_temperature=0.0.
 
@@ -246,7 +246,7 @@ def main():
     ap.add_argument("--prompt",   default="../examples/prompt.txt")
     ap.add_argument("--seed",     type=int, default=42)
     ap.add_argument("--instruct", default="male, young adult, moderate pitch")
-    ap.add_argument("--lang",     default="French")
+    ap.add_argument("--lang",     default="English")
     ap.add_argument("--duration", type=float, default=None)
     ap.add_argument("--quant",    default="F32",
                     help="quantization suffix for GGUF (default: F32, e.g. BF16, Q8_0, Q4_K_M)")

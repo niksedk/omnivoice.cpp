@@ -242,7 +242,7 @@ static bool prompt_tts_build(PromptTTS *          out,
     }
 
     // Mirror Python _resolve_language: pass-through valid ISO IDs, lowercase
-    // and look up names like "French" -> "fr". Empty result falls back to
+    // and look up names like "English" -> "en". Empty result falls back to
     // "None" so the special tokens still wrap a single placeholder token.
     std::string lang_resolved = resolve_language(lang);
     std::string lang_str      = lang_resolved.empty() ? "None" : lang_resolved;

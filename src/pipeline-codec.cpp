@@ -183,6 +183,10 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
     // get_rows on CUDA) to the CPU backend. 4096 nodes covers HuBERT 12L
     // + DAC encoder + DAC decoder graphs.
     pc->sched = backend_sched_new(bp, 4096);
+    if (!pc->sched) {
+        pipeline_codec_free(pc);
+        return false;
+    }
 
     return true;
 }
