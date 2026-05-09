@@ -12,7 +12,7 @@
 // printf semantics ; messages longer than the internal buffer are
 // truncated, never split. Passing NULL as fmt clears the slot.
 //
-// ov_throw is the load-path counterpart : functions deep inside the GGUF
+// ov_throw is the load-path counterpart: functions deep inside the GGUF
 // reader and the audio tokenizer load chain cannot return false up 97 call
 // sites without a massive cascade. They throw a std::runtime_error instead,
 // which the ABI boundary entries (ov_init, ov_synthesize) catch and

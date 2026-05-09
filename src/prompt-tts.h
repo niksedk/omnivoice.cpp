@@ -96,7 +96,7 @@ static bool prompt_tts_is_cjk(uint32_t cp) {
     return cp >= 0x4E00 && cp <= 0x9FFF;
 }
 
-// _combine_text : five steps, pixel perfect with the reference utility.
+// _combine_text: five steps, pixel perfect with the reference utility.
 //   1. concat ref_text + " " + text after stripping each
 //   2. drop CR / LF
 //   3. replace full-width parens U+FF08 / U+FF09 with ASCII ( / )
@@ -140,7 +140,7 @@ static std::string prompt_tts_combine_text(const std::string & text, const std::
         cps.push_back(cp);
     }
 
-    // Step 4 : collapse space / tab runs into one space.
+    // Step 4: collapse space / tab runs into one space.
     std::vector<uint32_t> collapsed;
     collapsed.reserve(cps.size());
     bool in_space = false;
@@ -157,7 +157,7 @@ static std::string prompt_tts_combine_text(const std::string & text, const std::
         }
     }
 
-    // Step 5 : drop spaces adjacent to CJK ideographs.
+    // Step 5: drop spaces adjacent to CJK ideographs.
     std::string out;
     out.reserve(raw.size());
     for (size_t j = 0; j < collapsed.size(); j++) {
@@ -324,14 +324,14 @@ static bool prompt_tts_build(PromptTTS *          out,
         return out->attention_mask[((size_t) b * (size_t) c_len + (size_t) sq) * (size_t) c_len + (size_t) skv];
     };
 
-    // Cond row : full bidirectional attention on the c_len window.
+    // Cond row: full bidirectional attention on the c_len window.
     for (int sq = 0; sq < c_len; sq++) {
         for (int skv = 0; skv < c_len; skv++) {
             attn_at(0, sq, skv) = 1;
         }
     }
 
-    // Uncond row : full bidirectional inside the u_len target window, diagonal
+    // Uncond row: full bidirectional inside the u_len target window, diagonal
     // pads on the trailing positions [u_len, c_len).
     for (int sq = 0; sq < u_len; sq++) {
         for (int skv = 0; skv < u_len; skv++) {

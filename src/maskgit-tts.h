@@ -1,7 +1,7 @@
 #pragma once
 // maskgit-tts.h: iterative non autoregressive decoder for OmniVoice TTS.
 //
-// Implements the reference _generate_iterative loop : N stateless forwards of
+// Implements the reference _generate_iterative loop: N stateless forwards of
 // the LLM with cond + uncond CFG batching, top-k confidence sampling on the
 // audio slots, and a cosine timestep schedule. Greedy decoding (class
 // temperature 0, position temperature 0) is fully deterministic and is used
@@ -30,7 +30,7 @@ struct MaskgitConfig {
     uint64_t seed                 = 42;  // only consulted when temperatures > 0
 };
 
-// Build the cosine timesteps : t_shift * t / (1 + (t_shift - 1) * t) on
+// Build the cosine timesteps: t_shift * t / (1 + (t_shift - 1) * t) on
 // linspace(0, 1, num_step + 1). Returns a vector of size num_step + 1.
 static std::vector<float> maskgit_timesteps(int num_step, float t_shift) {
     std::vector<float> ts(num_step + 1);
@@ -41,7 +41,7 @@ static std::vector<float> maskgit_timesteps(int num_step, float t_shift) {
     return ts;
 }
 
-// Build the per-step demask schedule : how many slots to fill at each step.
+// Build the per-step demask schedule: how many slots to fill at each step.
 // total = T * K, last step takes the remainder. Mirrors the reference
 // rounding (ceil) and clamping (rem).
 static std::vector<int> maskgit_schedule(int num_step, int total_mask, const std::vector<float> & timesteps) {
@@ -83,7 +83,7 @@ static void maskgit_log_softmax_inplace(float * x, int V) {
     }
 }
 
-// Top-k keep filter on a length-V row : keep the top ratio*V values, set
+// Top-k keep filter on a length-V row: keep the top ratio*V values, set
 // the rest to -INF. Mirrors _filter_top_k.
 static void maskgit_top_k_filter_inplace(float * x, int V, float ratio) {
     int k = (int) std::ceil((double) ratio * (double) V);
@@ -103,8 +103,8 @@ static void maskgit_top_k_filter_inplace(float * x, int V, float ratio) {
     }
 }
 
-// Gumbel augmented sampling : x[v] = x[v] / temperature + gumbel(0, 1).
-// Mirrors the reference _gumbel_sample : single uniform draw per slot,
+// Gumbel augmented sampling: x[v] = x[v] / temperature + gumbel(0, 1).
+// Mirrors the reference _gumbel_sample: single uniform draw per slot,
 // then noise = log(log(u + eps) + eps) negated twice. Uniforms come from
 // our Philox4x32-10 helper with PyTorch CUDA conventions :
 //   key   = seed
@@ -151,7 +151,7 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         return {};
     }
 
-    const int audio_start_cond = S - T;  // cond row : audio starts at c_len - T
+    const int audio_start_cond = S - T;  // cond row: audio starts at c_len - T
 
     std::vector<int32_t> tokens((size_t) K * (size_t) T, mask_id);
 
@@ -201,9 +201,9 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
         }
 
         // Extract cond and uncond logits at audio positions, layout [K, T, V].
-        // Audio-only path : cond and uncond are already compact [V, K, T] per
+        // Audio-only path: cond and uncond are already compact [V, K, T] per
         // row, source index = (t * K + k) * V on each row.
-        // Full path : cond row 0 audio is at S range [audio_start_cond, S),
+        // Full path: cond row 0 audio is at S range [audio_start_cond, S),
         // uncond row 1 audio is at [0, T).
         std::vector<float> c_log((size_t) K * (size_t) T * (size_t) V);
         std::vector<float> u_log((size_t) K * (size_t) T * (size_t) V);
@@ -304,7 +304,7 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
             debug_dump(&dbg, "mg-log-probs-step0", log_probs.data(), ktv_shape, 3);
         }
 
-        // Apply layer penalty : scores -= k * layer_penalty_factor.
+        // Apply layer penalty: scores -= k * layer_penalty_factor.
         for (int k = 0; k < K; k++) {
             for (int t = 0; t < T; t++) {
                 confidence[(size_t) k * T + t] -= (float) k * cfg.layer_penalty_factor;
@@ -345,9 +345,9 @@ static std::vector<int32_t> maskgit_generate(PipelineTTS *         pt,
 
             tokens[(size_t) k * T + t] = v;
 
-            // cond row : input_ids[0, k, audio_start_cond + t]
+            // cond row: input_ids[0, k, audio_start_cond + t]
             prompt->input_ids[((size_t) 0 * K + k) * S + (size_t) (audio_start_cond + t)] = v;
-            // uncond row : input_ids[1, k, t]
+            // uncond row: input_ids[1, k, t]
             prompt->input_ids[((size_t) 1 * K + k) * S + (size_t) t]                      = v;
         }
 

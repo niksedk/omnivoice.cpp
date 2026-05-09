@@ -1,4 +1,4 @@
-// quantize.cpp : GGUF requantizer for OmniVoice
+// quantize.cpp: GGUF requantizer for OmniVoice
 // Reads BF16 GGUF, writes quantized GGUF with mixed-precision K-quant policy.
 // Policy mirrors llama-quantize: important tensors (v_proj, down_proj) get
 // bumped in S/M variants, embed_tokens always Q6_K, norms promoted to F32.
@@ -91,7 +91,7 @@ static bool is_embed(const char * name) {
 // Should this tensor be quantized at all?
 //
 // Single source of truth for the quantization policy. Applies to EVERY
-// variant (BF16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, ...) : tensors that return
+// variant (BF16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, ...): tensors that return
 // false here keep their source dtype (F32) regardless of the requested
 // type. Conv weights pass through the main loop and fall back to F16 when
 // the row width does not divide the variant block size (kernel K=7,3,1,...).
@@ -126,14 +126,14 @@ static bool should_quantize(const char * name, int n_dims, const char * arch) {
     if (strstr(name, "null_condition_emb")) {
         return false;
     }
-    // Snake activation alpha : stored as 3D (1, C, 1), is a per-channel
+    // Snake activation alpha: stored as 3D (1, C, 1), is a per-channel
     // activation parameter, not a weight. dac_load_alpha widens F32 or BF16
     // to F32 on the backend with a reciprocal transform, no other dtype
     // path. Keep it source-dtype in every variant.
     if (strstr(name, ".snake1.alpha") || strstr(name, ".snake2.alpha")) {
         return false;
     }
-    // RVQ codebooks and surrounding linear projections : nearest-neighbor
+    // RVQ codebooks and surrounding linear projections: nearest-neighbor
     // lookup is sensitive to per-row quantization noise. Q8_0 / K-quants
     // break ref audio encoding and tank voice cloning ; BF16 already loses
     // enough mantissa to drift codes. Keep them at F32 in every variant.
@@ -342,7 +342,7 @@ int main(int argc, char ** argv) {
         bool can_convert = (t->type == GGML_TYPE_BF16 || t->type == GGML_TYPE_F16 || t->type == GGML_TYPE_F32);
         bool aligned     = (t->ne[0] % ggml_blck_size(target) == 0);
 
-        // Conv kernels (K=7,3,1,...) cannot fit a block-quant row : fall back
+        // Conv kernels (K=7,3,1,...) cannot fit a block-quant row: fall back
         // to F16. F16 has no block size, 10-bit mantissa beats BF16 (7) and
         // Q* effective on these weights, and gf_load_conv_f16 memcpys F16
         // source straight to the F16 backend tensor at load time.

@@ -1,8 +1,8 @@
 #pragma once
-// debug.h : tensor dump and compare helpers for Python vs GGML validation.
+// debug.h: tensor dump and compare helpers for Python vs GGML validation.
 // Dumps raw f32 arrays to binary files, both backends convert to f32 before
 // dump.
-// File format : [int32 ndims] [int32 dim0] [int32 dim1] ... [float data...]
+// File format: [int32 ndims] [int32 dim0] [int32 dim1] ... [float data...]
 
 #include <cmath>
 #include <cstdint>
@@ -22,7 +22,7 @@ static void debug_init(DebugDumper * d, const char * dir) {
 }
 
 // Dump f32 tensor to binary file.
-// Format : [ndims:i32] [shape:i32 x ndims] [data:f32 x numel]
+// Format: [ndims:i32] [shape:i32 x ndims] [data:f32 x numel]
 static void debug_dump(const DebugDumper * d, const char * name, const float * data, const int * shape, int ndims) {
     if (!d->enabled) {
         return;
@@ -56,24 +56,24 @@ static void debug_dump(const DebugDumper * d, const char * name, const float * d
     fprintf(stderr, "\n");
 }
 
-// Convenience : dump 1D tensor [n].
+// Convenience: dump 1D tensor [n].
 static void debug_dump_1d(const DebugDumper * d, const char * name, const float * data, int n) {
     debug_dump(d, name, data, &n, 1);
 }
 
-// Convenience : dump 2D tensor [rows, cols].
+// Convenience: dump 2D tensor [rows, cols].
 static void debug_dump_2d(const DebugDumper * d, const char * name, const float * data, int dim0, int dim1) {
     int shape[2] = { dim0, dim1 };
     debug_dump(d, name, data, shape, 2);
 }
 
-// Convenience : dump 3D tensor [d0, d1, d2].
+// Convenience: dump 3D tensor [d0, d1, d2].
 static void debug_dump_3d(const DebugDumper * d, const char * name, const float * data, int d0, int d1, int d2) {
     int shape[3] = { d0, d1, d2 };
     debug_dump(d, name, data, shape, 3);
 }
 
-// Convenience : dump 4D tensor [d0, d1, d2, d3].
+// Convenience: dump 4D tensor [d0, d1, d2, d3].
 static void
 debug_dump_4d(const DebugDumper * d, const char * name, const float * data, int d0, int d1, int d2, int d3) {
     int shape[4] = { d0, d1, d2, d3 };

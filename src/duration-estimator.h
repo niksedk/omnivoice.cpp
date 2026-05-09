@@ -1120,12 +1120,12 @@ static float duration_get_char_weight(uint32_t cp) {
     if (cp == 0x20) {
         return duration_weights[DUR_SCR_SPACE];
     }
-    // Arabic Tatweel : explicit pre-empt before the category check.
+    // Arabic Tatweel: explicit pre-empt before the category check.
     if (cp == 0x0640) {
         return duration_weights[DUR_SCR_MARK];
     }
 
-    // Unicode category check : M / P / S / Z / N short-circuit any
+    // Unicode category check: M / P / S / Z / N short-circuit any
     // script-based weight.
     int cat = duration_cat_lookup(cp);
     if (cat >= 0) {
@@ -1143,7 +1143,7 @@ static float duration_get_char_weight(uint32_t cp) {
         }
     }
 
-    // bisect_left equivalent on script_ranges.end : finds the smallest
+    // bisect_left equivalent on script_ranges.end: finds the smallest
     // index i such that ranges[i].end >= cp.
     int lo = 0;
     int hi = (int) duration_script_n;
@@ -1159,7 +1159,7 @@ static float duration_get_char_weight(uint32_t cp) {
         return duration_weights[duration_script_ranges[lo].script];
     }
 
-    // Upper planes : CJK Ext B/C/D and historic scripts default to CJK.
+    // Upper planes: CJK Ext B/C/D and historic scripts default to CJK.
     if (cp > 0x20000) {
         return duration_weights[DUR_SCR_CJK];
     }
@@ -1209,7 +1209,7 @@ static float duration_estimate(const std::string & target_text,
 }
 
 // Number of target audio tokens for a synthesis call. Mirrors
-// OmniVoice._estimate_target_tokens : when no reference is available,
+// OmniVoice._estimate_target_tokens: when no reference is available,
 // falls back to the canonical 'Nice to meet you.' anchor at 25 tokens.
 // Result is truncated to int (Python int() semantics) and floored to 1.
 static int duration_estimate_tokens(const std::string & target_text,

@@ -1,7 +1,7 @@
 #pragma once
 // audio-postproc-stream.h: streaming version of audio-postproc.h.
 //
-// Three stateful stages chained as a pipeline : crossfader -> silence remover
+// Three stateful stages chained as a pipeline: crossfader -> silence remover
 // -> fade and pad. Each stage exposes push(samples, n, emit) and flush(emit)
 // where emit is a callable bool(const float*, int) returning false to abort.
 // Bit perfect against the buffered path on the audio shapes that OmniVoice
@@ -22,11 +22,11 @@
 #include <utility>
 #include <vector>
 
-// Stage 1 : streaming cross fade. Holds the last fade_n samples of the most
+// Stage 1: streaming cross fade. Holds the last fade_n samples of the most
 // recent emission as `pending`. On the next push, applies fade out to the tail
 // of pending, emits pending, emits silence_n zeros, applies fade in to the
 // head of the new chunk, emits the new chunk minus its own tail. The retained
-// tail becomes the new pending. Last chunk : flush emits pending verbatim, no
+// tail becomes the new pending. Last chunk: flush emits pending verbatim, no
 // trailing fade out, matching the Python behaviour of leaving the final
 // chunk's tail intact.
 struct crossfader_stream {
@@ -119,14 +119,14 @@ struct crossfader_stream {
     }
 };
 
-// Stage 2 : streaming silence remover. Bit perfect against remove_silence in
+// Stage 2: streaming silence remover. Bit perfect against remove_silence in
 // audio-postproc.h on chunks where mid silent groups are scoped within the
 // look ahead horizon of min_sil_n samples. Internally accumulates pushed
 // samples (in float and int16, in lockstep) and advances an emit cursor as
 // scan windows close. Trail trim runs at flush by reversing the un emitted
 // suffix and reusing postproc_detect_leading_silence.
 //
-// Latency : up to min_sil_n samples (500 ms at 24 kHz, mid_sil=500). Once a
+// Latency: up to min_sil_n samples (500 ms at 24 kHz, mid_sil=500). Once a
 // silent group closes (next non silent seek_step), the prefix up to its
 // determined drop boundary emits in one shot.
 struct silence_remover_stream {
@@ -214,7 +214,7 @@ struct silence_remover_stream {
             scan_pos      = emit_pos;
         }
 
-        // Mid scan : advance scan_pos by seek_step while we have a full
+        // Mid scan: advance scan_pos by seek_step while we have a full
         // min_sil_n window ahead. Track contiguous silent runs in silent_grp.
         while (scan_pos + (size_t) min_sil_n <= buf_s.size()) {
             double r         = postproc_slice_rms_s16(buf_s, scan_pos, (size_t) min_sil_n);
@@ -231,7 +231,7 @@ struct silence_remover_stream {
             scan_pos += (size_t) seek_step;
         }
 
-        // Emit safe prefix : when no silent group is pending, every sample up
+        // Emit safe prefix: when no silent group is pending, every sample up
         // to scan_pos is decided. With a pending group, hold everything until
         // the group closes (its drop boundary depends on the group's end).
         if (silent_grp.empty()) {
@@ -246,7 +246,7 @@ struct silence_remover_stream {
     }
 
     // Closes the active silent group [s, e] following the pydub pairwise
-    // midpoint dedup rule : if the gap is at least 2*keep_n, drop the middle
+    // midpoint dedup rule: if the gap is at least 2*keep_n, drop the middle
     // and keep keep_n on each side ; otherwise keep all samples but split the
     // overlap at (s + e) / 2 to avoid duplicating samples in the concat.
     template <class Emit> bool close_silent_group(Emit emit) {
@@ -273,11 +273,11 @@ struct silence_remover_stream {
         return true;
     }
 
-    // Trail trim : reverse the un emitted suffix and run the same leading
+    // Trail trim: reverse the un emitted suffix and run the same leading
     // silence detector as remove_silence does. The trailing silence amount
     // beyond trail_sil_ms gets dropped, matching the buffered path verbatim.
     template <class Emit> bool flush(Emit emit) {
-        // A still open silent group at flush is the trailing silence : the
+        // A still open silent group at flush is the trailing silence: the
         // pydub split_on_silence keeps margin keep_n past the last non silent,
         // then the trail trim reduces that margin to trail_sil_ms.
         size_t end_emit;
@@ -319,7 +319,7 @@ struct silence_remover_stream {
     }
 };
 
-// Stage 3 : streaming fade and pad. Emits pad_n zeros at start, holds the
+// Stage 3: streaming fade and pad. Emits pad_n zeros at start, holds the
 // first fade_n samples to apply fade in, then streams the body while keeping
 // the last fade_n samples as a tail buffer for the closing fade out. Flush
 // applies fade out, emits the tail, then emits pad_n trailing zeros. Bit
@@ -351,7 +351,7 @@ struct fade_pad_stream {
             return true;
         }
 
-        // Leading pad : emit pad_n zeros once, on the first non empty push.
+        // Leading pad: emit pad_n zeros once, on the first non empty push.
         if (!started) {
             if (pad_n > 0) {
                 std::vector<float> z((size_t) pad_n, 0.0f);
@@ -365,7 +365,7 @@ struct fade_pad_stream {
         const float * cursor    = samples;
         int           remaining = n;
 
-        // Phase 1 : collect first fade_n samples, apply fade in, emit.
+        // Phase 1: collect first fade_n samples, apply fade in, emit.
         if (!head_faded_in) {
             int need = fade_n - (int) head_buf.size();
             int take = std::min(need, remaining);
@@ -392,7 +392,7 @@ struct fade_pad_stream {
             return true;
         }
 
-        // Phase 2 : append to tail_buf, emit all but the last fade_n.
+        // Phase 2: append to tail_buf, emit all but the last fade_n.
         tail_buf.insert(tail_buf.end(), cursor, cursor + remaining);
         int emit_n = (int) tail_buf.size() - fade_n;
         if (emit_n > 0) {

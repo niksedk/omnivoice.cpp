@@ -2,7 +2,7 @@
 // audio-io.h: WAV read/write for omnivoice.cpp.
 // Reads any WAV (PCM16 / PCM24 / float32, mono or stereo, any rate).
 // Writes mono WAV in S16, S24 or F32 at the source sample rate.
-// Internal pipelines : planar stereo float [L:T][R:T] for reads,
+// Internal pipelines: planar stereo float [L:T][R:T] for reads,
 // flat mono float [T] for writes (omnivoice is mono only).
 
 #include <cmath>
@@ -356,7 +356,7 @@ static bool audio_write_wav(const char * path, const float * audio, int T_audio,
 }
 
 // Minimal streaming WAV sink. Writes a wide RIFF / data size at open and
-// never updates them : the stream is one shot, non seekable, suitable for
+// never updates them: the stream is one shot, non seekable, suitable for
 // stdout pipes where the player reads until EOF. Use audio_write_wav for
 // seekable file output (the file there has accurate sizes in headers).
 struct wav_stream {

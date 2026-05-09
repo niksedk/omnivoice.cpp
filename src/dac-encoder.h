@@ -1,21 +1,21 @@
 #pragma once
-// dac-encoder.h : DAC acoustic encoder for OmniVoice (GGML)
+// dac-encoder.h: DAC acoustic encoder for OmniVoice (GGML)
 //
 // Mirror of dac-decoder.h. Reuses DACSnake, DACResUnit, load helpers, graph
 // ops via #include "dac-decoder.h". Architecture :
 //   conv1(1 -> 64, k=7) -> 5x ( 3 res_units -> snake -> strided Conv1d )
 //                       -> snake -> conv2(2048 -> 256, k=3)
-// Downsample : 8 * 5 * 4 * 2 * 3 = 960x (matches decoder upsample for round-trip).
-// Block layout differs from decoder : encoder runs the residuals first then
+// Downsample: 8 * 5 * 4 * 2 * 3 = 960x (matches decoder upsample for round-trip).
+// Block layout differs from decoder: encoder runs the residuals first then
 // the snake + downsampling conv at the end, which is the inverse order of
 // the decoder where snake + transposed conv come first.
 //
-// Input  : audio  [T_in,  1]    f32  (24 kHz mono waveform)
-// Output : latent [T_out, 256]  f32  with T_out = T_in / 960
+// Input:  audio  [T_in,  1]    f32  (24 kHz mono waveform)
+// Output: latent [T_out, 256]  f32  with T_out = T_in / 960
 
 #include "dac-decoder.h"
 
-// Encoder block : 3x ResUnit(in_ch) -> Snake(in_ch) -> strided Conv1d(in -> out)
+// Encoder block: 3x ResUnit(in_ch) -> Snake(in_ch) -> strided Conv1d(in -> out)
 // The res_units keep in_ch ; the post-residual snake works on in_ch ; the
 // strided conv at the end of the block is what brings the channel count up
 // from in_ch to out_ch alongside the temporal downsampling.
@@ -27,8 +27,8 @@ struct DACEncBlock {
     int                  in_ch;
     int                  out_ch;
     int                  stride;
-    int                  kernel;  // per-block : 16, 10, 8, 4, 6
-    int                  pad;     // per-block : 4, 3, 2, 1, 2
+    int                  kernel;  // per-block: 16, 10, 8, 4, 6
+    int                  pad;     // per-block: 4, 3, 2, 1, 2
 };
 
 struct DACEncoder {
@@ -54,7 +54,7 @@ struct DACEncoder {
 #define DAC_ENC_BLOCK_KERNELS { 16, 10, 8, 4, 6 }
 #define DAC_ENC_BLOCK_PADS    { 4, 3, 2, 1, 2 }
 
-// Full load : creates tensors in a private ctx, allocates them on the backend,
+// Full load: creates tensors in a private ctx, allocates them on the backend,
 // then copies the data with the appropriate transforms. Same 3-phase pattern
 // as dac_load (describe -> alloc -> fill).
 static bool dac_enc_load(DACEncoder * d, const GGUFModel & gf, ggml_backend_t backend) {
@@ -65,7 +65,7 @@ static bool dac_enc_load(DACEncoder * d, const GGUFModel & gf, ggml_backend_t ba
     static const int pads[]      = DAC_ENC_BLOCK_PADS;
     static const int dilations[] = DAC_RU_DILATIONS;
 
-    // Phase 1 : describe all tensors in a no_alloc context.
+    // Phase 1: describe all tensors in a no_alloc context.
     const int               n_tensors_max = 256;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params p             = { ctx_size, NULL, true };
@@ -111,7 +111,7 @@ static bool dac_enc_load(DACEncoder * d, const GGUFModel & gf, ggml_backend_t ba
     d->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 3, 2048, 256);
     d->c2b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 256);
 
-    // Phase 2 : allocate backend buffer for all tensors at once.
+    // Phase 2: allocate backend buffer for all tensors at once.
     d->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!d->weight_buf) {
         fprintf(stderr, "[DAC-Enc] FATAL: failed to allocate weight buffer\n");
@@ -119,7 +119,7 @@ static bool dac_enc_load(DACEncoder * d, const GGUFModel & gf, ggml_backend_t ba
     }
     ggml_backend_buffer_set_usage(d->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : copy data with per-tensor transforms (snake reciprocal, F32 cast).
+    // Phase 3: copy data with per-tensor transforms (snake reciprocal, F32 cast).
     gf_load_conv_f16(d->c1w, gf, "acoustic_encoder.conv1.weight");
     dac_load_bias_f32(d->c1b, gf, "acoustic_encoder.conv1.bias");
 
@@ -166,13 +166,13 @@ static void dac_enc_free(DACEncoder * d) {
 // Block forward (encoder, mirror inverse of the decoder block) :
 //   x = res_unit1(x)
 //   x = res_unit2(x)
-//   x = snake_post(res_unit3(x))    # NOTE : snake applied AFTER ru3, not in ru3
+//   x = snake_post(res_unit3(x))    # NOTE: snake applied AFTER ru3, not in ru3
 //   x = strided_conv(x)             # downsample by stride, in_ch -> out_ch
 static struct ggml_tensor * dac_enc_build_graph(struct ggml_context * ctx,
                                                 const DACEncoder *    d,
                                                 struct ggml_tensor *  audio  // [T_in, 1] f32
 ) {
-    // initial conv1 : 1 -> 64, k=7, pad=3
+    // initial conv1: 1 -> 64, k=7, pad=3
     struct ggml_tensor * x = dac_conv1d(ctx, d->c1w, d->c1b, audio, 1, 3, 1);
 
     // 5 down-sampling blocks

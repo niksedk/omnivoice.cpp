@@ -1,11 +1,11 @@
-// omnivoice-codec.cpp : codec CLI for OmniVoice.
+// omnivoice-codec.cpp: codec CLI for OmniVoice.
 //
 // Encode a 24 kHz mono WAV into RVQ codes (.rvq), or decode RVQ codes
 // back into a 24 kHz mono float32 WAV. Mode is inferred from the input file
-// extension : .wav in -> encode, .rvq in -> decode. Output is auto-named
+// extension: .wav in -> encode, .rvq in -> decode. Output is auto-named
 // next to the input file by swapping the extension.
 //
-// File format (.rvq) : flat code stream packed at 11 bits per code, LSB-first,
+// File format (.rvq): flat code stream packed at 11 bits per code, LSB-first,
 // no header. Layout is [K, T] row-major. K is fixed by the codec config in
 // the GGUF (8 codebooks). T = (filesize * 8) / (K * 11).
 
@@ -63,7 +63,7 @@ static std::vector<uint8_t> pack_codes(const std::vector<int32_t> & codes) {
     return out;
 }
 
-// Symmetric unpack : reads N codes from packed bytes.
+// Symmetric unpack: reads N codes from packed bytes.
 static std::vector<int32_t> unpack_codes(const std::vector<uint8_t> & in, size_t n_codes) {
     std::vector<int32_t> out(n_codes);
 
@@ -83,7 +83,7 @@ static std::vector<int32_t> unpack_codes(const std::vector<uint8_t> & in, size_t
 }
 
 // Read a .rvq file and unpack it into K*T codes. T is inferred from the file
-// size : T = (filesize * 8) / (K * RVQ_CODE_BITS).
+// size: T = (filesize * 8) / (K * RVQ_CODE_BITS).
 static bool read_rvq(const char * path, int K, std::vector<int32_t> & codes, int * n_frames) {
     FILE * f = fopen(path, "rb");
     if (!f) {
@@ -263,7 +263,7 @@ int main_impl(int argc, char ** argv) {
 }
 
 int main(int argc, char ** argv) {
-    // Top-level boundary : the codec load chain signals fatal errors via
+    // Top-level boundary: the codec load chain signals fatal errors via
     // exceptions instead of exit(1). Catching here turns std::terminate
     // into a clean error line.
     try {

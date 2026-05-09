@@ -68,7 +68,7 @@ bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp,
 
     gf_close(&pt->gguf);
 
-    // Scheduler : routes ops the GPU backend cannot run (e.g. K-quant
+    // Scheduler: routes ops the GPU backend cannot run (e.g. K-quant
     // get_rows on CUDA) to the CPU backend. 8192 nodes covers the full
     // 28L Qwen3 graph with batched MaskGIT.
     pt->sched = backend_sched_new(bp, 8192);
@@ -85,7 +85,7 @@ void pipeline_tts_free(PipelineTTS * pt) {
         ggml_backend_sched_free(pt->sched);
     }
     wctx_free(&pt->wctx);
-    // Idempotent : gf_close NULL-checks every handle and zeroes the struct.
+    // Idempotent: gf_close NULL-checks every handle and zeroes the struct.
     // The success path already closed the mmap mid-load ; this call is a
     // no-op there. The throw path leaves it open and this call releases it.
     gf_close(&pt->gguf);
@@ -132,8 +132,8 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
     // Convert int 0/1 attention mask to F16 additive bias matching the Python
     // reference. OmniVoice passes a boolean attention_mask to transformers,
     // which promotes True/False to 1.0/0.0 floats and adds it to the attention
-    // scores : allowed positions get a +1.0 boost, blocked positions stay at
-    // 0.0. This is not a hard mask : every position still contributes to the
+    // scores: allowed positions get a +1.0 boost, blocked positions stay at
+    // 0.0. This is not a hard mask: every position still contributes to the
     // softmax, the model was trained against this exact bias semantics.
     // F16 is the type expected by ggml_flash_attn_ext, and 1.0 / 0.0 are
     // representable exactly in F16 so there is no precision loss.
@@ -148,7 +148,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
         }
     }
 
-    // Node budget : custom embed ~30, 28L stack ~850, audio_heads ~5.
+    // Node budget: custom embed ~30, 28L stack ~850, audio_heads ~5.
     // 8192 leaves room for longer sequences and future fusions.
     const int    n_max_nodes    = 8192;
     const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
@@ -176,7 +176,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
     ggml_set_name(t_inv_mask, "inv_mask");
     ggml_set_input(t_inv_mask);
 
-    // Stack input : positions 0..S-1.
+    // Stack input: positions 0..S-1.
     struct ggml_tensor * t_positions = ggml_new_tensor_1d(gctx, GGML_TYPE_I32, S);
     ggml_set_name(t_positions, "positions");
     ggml_set_input(t_positions);
@@ -281,7 +281,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
             const size_t       numel = (size_t) dim0 * (size_t) dim1;
             std::vector<float> buf(numel);
             ggml_backend_tensor_get(t, buf.data(), 0, numel * sizeof(float));
-            // GGML layout : fast axis is dim0, slow axis is dim1. Numpy reads
+            // GGML layout: fast axis is dim0, slow axis is dim1. Numpy reads
             // back as [dim1, dim0] row-major, identical to hidden_states[b]
             // and inputs_embeds[b] from the Python reference.
             debug_dump_2d(&dbg, full_name.c_str(), buf.data(), dim1, dim0);
@@ -297,7 +297,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
             dump_tensor_2d(dump_intermediates[i], std::string(dump_hidden_name) + suffix);
         }
 
-        // Layer 1 sub-module taps : norm1, attn (pre residual), norm2, mlp (pre residual).
+        // Layer 1 sub-module taps: norm1, attn (pre residual), norm2, mlp (pre residual).
         const char * sub_names[4] = { "-l1-norm1", "-l1-attn", "-l1-norm2", "-l1-mlp" };
         for (size_t i = 0; i < sub_outs.size() && i < 4; i++) {
             dump_tensor_2d(sub_outs[i], std::string(dump_hidden_name) + sub_names[i]);
@@ -359,7 +359,7 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
     }
 }
 
-// Batched LLM forward : single graph that fuses B' independent forwards on the
+// Batched LLM forward: single graph that fuses B' independent forwards on the
 // trailing batch dim. Used for the cond + uncond CFG batching where row 0 is
 // the cond row and row 1 is the uncond row, both running on the same S window.
 // Pre-computed buffers (mask_f, inv_mask_f, positions, attn_f16) come from
@@ -443,7 +443,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
         }
     }
 
-    // Node budget : custom embed ~30, 28L stack ~850 (4D adds a few reshape
+    // Node budget: custom embed ~30, 28L stack ~850 (4D adds a few reshape
     // nodes per layer), audio_heads + reshape ~5. 8192 stays comfortable.
     const int    n_max_nodes    = 8192;
     const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
@@ -479,7 +479,7 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
 
     // Per-row attention bias. flash_attn_ext expects mask [n_kv, n_batch, ne32, ne33]
     // with n_head broadcast through ne32 and the outer batch through ne33. Layout
-    // [S, S, 1, B_prime] : skv fast, sq mid, head broadcast, batch on the slowest.
+    // [S, S, 1, B_prime]: skv fast, sq mid, head broadcast, batch on the slowest.
     struct ggml_tensor * t_attn = NULL;
     if (ctx->has_attn_mask) {
         t_attn = ggml_new_tensor_4d(gctx, GGML_TYPE_F16, S, S, 1, B_prime);
@@ -518,12 +518,12 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
     struct ggml_tensor * logits      = ggml_reshape_4d(gctx, logits_flat, V, K, S, B_prime);
     ggml_set_name(logits, "audio_logits");
 
-    // Audio truncation : when T_audio > 0, the MaskGIT decoder only reads the
+    // Audio truncation: when T_audio > 0, the MaskGIT decoder only reads the
     // audio positions on cond row 0 (S range [S - T_audio, S)) and on uncond
     // row 1 (S range [0, T_audio)). Cutting these views before set_output
     // shrinks the GPU->CPU transfer from B_prime * V * K * S floats down to
     // 2 * V * K * T_audio floats, ~5.6x less for the typical voice cloning
-    // shape. Math is identical : we just keep less of the same elements.
+    // shape. Math is identical: we just keep less of the same elements.
     struct ggml_tensor * cond_audio   = nullptr;
     struct ggml_tensor * uncond_audio = nullptr;
     if (T_audio > 0) {
@@ -663,7 +663,7 @@ static bool tts_should_cancel(tts_cancel * cc) {
     return false;
 }
 
-// Single-shot synthesis : pipeline_tts_generate followed by
+// Single-shot synthesis: pipeline_tts_generate followed by
 // pipeline_codec_decode. Refuses to decode if any audio_token equals
 // lm.audio_mask_id, which would corrupt the RVQ lookup. Used as a building
 // block by tts_synthesize_long_internal for chunk N >= 1 (and for the
@@ -964,7 +964,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
     const int hop        = pc->hop_length;
     const int frame_rate = sr / hop;
 
-    // Volume scale resolved up front : voice cloning applies ref_rms / 0.1
+    // Volume scale resolved up front: voice cloning applies ref_rms / 0.1
     // when the reference is quiet, no op when it is loud ; voice design
     // (ref_rms < 0) skips peak / 0.5 and runs at native level.
     float volume_scale = 1.0f;
@@ -977,7 +977,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
         ov_log(OV_LOG_INFO, "[TTS-Stream] voice clone scale %.4f (ref_rms %.4f)", volume_scale, ref_rms);
     }
 
-    // Pipeline stages : cross fade (0.3s), silence remove (mid=500, lead=100,
+    // Pipeline stages: cross fade (0.3s), silence remove (mid=500, lead=100,
     // trail=100, -50 dBFS), volume scale, fade and pad (fade=0.1, pad=0.1).
     crossfader_stream      cf;
     silence_remover_stream sr_stage;
@@ -988,7 +988,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
 
     bool aborted = false;
 
-    // Innermost emit : forwards to on_chunk and tracks abort.
+    // Innermost emit: forwards to on_chunk and tracks abort.
     auto emit_to_user = [&](const float * s, int n) -> bool {
         if (n <= 0) {
             return true;
@@ -1000,12 +1000,12 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
         return true;
     };
 
-    // fade_pad emit : straight to user.
+    // fade_pad emit: straight to user.
     auto emit_fp = [&](const float * s, int n) -> bool {
         return fp.push(s, n, emit_to_user);
     };
 
-    // silence_remove emit : volume scale (in place on a small buffer) then
+    // silence_remove emit: volume scale (in place on a small buffer) then
     // forward to fade_pad. The scale = 1 fast path skips the copy.
     auto emit_post_silence = [&](const float * s, int n) -> bool {
         if (volume_scale == 1.0f) {
@@ -1018,7 +1018,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
         return emit_fp(scaled.data(), n);
     };
 
-    // cross_fade emit : forward to silence_remove.
+    // cross_fade emit: forward to silence_remove.
     auto emit_post_cf = [&](const float * s, int n) -> bool {
         return sr_stage.push(s, n, emit_post_silence);
     };
@@ -1028,7 +1028,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
         return cf.push(a.data(), (int) a.size(), emit_post_cf);
     };
 
-    // Same chunking decision as the buffered path : single shot below the
+    // Same chunking decision as the buffered path: single shot below the
     // threshold, otherwise split on punctuation and chain chunks.
     int T_total = (T_override > 0) ? T_override : duration_estimate_tokens(text, ref_text, ext_ref_T);
 
@@ -1161,7 +1161,7 @@ static ov_status tts_synthesize_long_stream_internal(PipelineTTS *         pt,
 }
 
 // Validate and normalise the raw instruct string against the voice-design
-// vocabulary. Picks the target language from the synthesis text : any CJK
+// vocabulary. Picks the target language from the synthesis text: any CJK
 // ideograph -> Chinese, otherwise English.
 bool pipeline_tts_resolve_instruct(const VoiceDesign * vd,
                                    const std::string & text,
@@ -1199,7 +1199,7 @@ struct RefEncoded {
 };
 
 // Encodes the optional raw reference waveform into RVQ codes. Mirrors the
-// upstream reference preprocessing chain : add_punctuation / RMS / auto-gain
+// upstream reference preprocessing chain: add_punctuation / RMS / auto-gain
 // / silence-trim / hop alignment / codec encode. Returns has_ref=false when
 // no reference is supplied. Returns has_ref=true with ref_codes empty on
 // encode failure (caller distinguishes via ref_codes.empty()).
@@ -1229,7 +1229,7 @@ static RefEncoded tts_encode_ref(PipelineTTS *       pt,
 
     std::vector<float> ref_audio(ref_audio_24k, ref_audio_24k + ref_n_samples);
 
-    // Mirror Python OmniVoice : compute ref_rms once on the loaded waveform.
+    // Mirror Python OmniVoice: compute ref_rms once on the loaded waveform.
     // Auto loudness normalisation when ref RMS is in (0, 0.1). Scales the
     // buffer so the new RMS hits exactly 0.1 ; the ORIGINAL ref_rms is what
     // we plumb into the post-proc to rescale the generated output back to
@@ -1310,7 +1310,7 @@ ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
         ov_audio_free(out);
     }
 
-    // Reject ambiguous reference inputs : raw waveform and pre-encoded tokens
+    // Reject ambiguous reference inputs: raw waveform and pre-encoded tokens
     // are mutually exclusive. KISS, the caller is told immediately rather
     // than picking a winner silently.
     bool has_raw    = (params->ref_audio_24k != nullptr) && (params->ref_n_samples > 0);
@@ -1329,7 +1329,7 @@ ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
     std::string ref_text(params->ref_text ? params->ref_text : "");
 
     // Resolve the raw instruct against the voice-design vocabulary. The
-    // target language is selected from the synthesis text : any CJK ideograph
+    // target language is selected from the synthesis text: any CJK ideograph
     // -> Chinese, otherwise English.
     std::string instruct;
     if (!pipeline_tts_resolve_instruct(vd, text, raw_instruct, &instruct)) {
@@ -1367,7 +1367,7 @@ ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
     }
 
     // Resolve the reference triple fed to the synthesis helpers. Three
-    // routes : raw waveform freshly encoded, pre-encoded tokens passed in,
+    // routes: raw waveform freshly encoded, pre-encoded tokens passed in,
     // or pure TTS with no reference at all.
     const int32_t * synth_ref_tokens = nullptr;
     int             synth_ref_T      = 0;
@@ -1386,7 +1386,7 @@ ov_status pipeline_tts_synthesize(PipelineTTS *         pt,
         synth_ref_rms    = -1.0f;
     }
 
-    // Streaming path : on_chunk emits chunks of post processed audio at the
+    // Streaming path: on_chunk emits chunks of post processed audio at the
     // codec sample rate, out stays empty on success. Buffered path collects
     // into a single audio vector and copies into out.
     if (params->on_chunk) {

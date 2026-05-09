@@ -33,7 +33,7 @@ struct PipelineTTS {
 
     // Backend pair (GPU + CPU fallback) and scheduler. The scheduler routes
     // ops to the CPU backend when the GPU does not implement them (typical
-    // case : K-quant get_rows on CUDA, asserts in the CUDA backend without
+    // case: K-quant get_rows on CUDA, asserts in the CUDA backend without
     // a scheduler). Compute uses ggml_backend_sched_graph_compute, never
     // ggml_backend_graph_compute directly.
     BackendPair          bp;
@@ -54,7 +54,7 @@ bool pipeline_tts_load(PipelineTTS * pt, const char * gguf_path, BackendPair bp,
 // Release weights. Safe on a zeroed struct.
 void pipeline_tts_free(PipelineTTS * pt);
 
-// Full LLM forward in a single graph : custom embed -> 28L stack -> audio_heads
+// Full LLM forward in a single graph: custom embed -> 28L stack -> audio_heads
 // reshape. Output is audio_logits in GGML layout (V fast, K mid, S slow).
 // input_ids is laid out [K, S] row-major (k slow, s fast), audio_mask is [S]
 // with 0 / 1 entries. attention_mask is optional [S, S] int with 0 / 1
@@ -70,7 +70,7 @@ std::vector<float> pipeline_tts_llm_forward(PipelineTTS *   pt,
                                             const char *    dump_hidden_name = nullptr);
 
 // Pre-computed inputs that stay constant across the 32 MaskGIT steps for a
-// chunk : audio_mask (B' * S floats), inv_mask, positions (S int32), and
+// chunk: audio_mask (B' * S floats), inv_mask, positions (S int32), and
 // attn_f16 (B' * S * S F16 bias). Building these once instead of 32 times
 // saves ~9 ms / step on the typical voice cloning shape (S ~ 1880, B'=2).
 // Holds the original int32 pointers too so the debug loop path that calls
@@ -98,7 +98,7 @@ void pipeline_tts_llm_batched_ctx_init(MaskgitBatchedCtx * ctx,
                                        int                 B_prime,
                                        int                 S);
 
-// Batched version : runs B' independent forwards (cond + uncond stacked).
+// Batched version: runs B' independent forwards (cond + uncond stacked).
 // input_ids  [B', K, S]      row-major (b slow, k mid, s fast). Mutates
 //                              between MaskGIT steps as tokens get demasked.
 // ctx                          pre-computed audio_mask / inv / positions /
@@ -117,10 +117,10 @@ std::vector<float> pipeline_tts_llm_forward_batched(PipelineTTS *             pt
                                                     int                       T_audio         = 0,
                                                     const char *              dump_hidden_dir = nullptr);
 
-// Low-level token generator : tokenize text, build prompt + CFG batch, run
+// Low-level token generator: tokenize text, build prompt + CFG batch, run
 // the MaskGIT iterative decoder. Returns flat audio_tokens of size K * T (k
 // slow, t fast) or an empty vector on failure. ref_text and ref_audio_tokens
-// enable the voice cloning path : when ref_audio_tokens is non-NULL it must
+// enable the voice cloning path: when ref_audio_tokens is non-NULL it must
 // point to ref_T audio frames laid out [K, ref_T] and ref_text should hold
 // the transcript (concatenated to text via _combine_text). Pass NULL / 0 /
 // ""  for the pure TTS path. The denoise flag triggers the <|denoise|>
@@ -143,7 +143,7 @@ std::vector<int32_t> pipeline_tts_generate(PipelineTTS *         pt,
                                            uint32_t *            ctr_lo_inout = nullptr);
 
 // Validate and normalise the raw instruct string against the voice-design
-// vocabulary. The target language is selected from the synthesis text : any
+// vocabulary. The target language is selected from the synthesis text: any
 // CJK ideograph in text -> Chinese, otherwise English. On error, prints a
 // "[TTS] ERROR: ..." line and returns false. Bypassed by callers that go
 // through pipeline_tts_synthesize, which resolves the instruct internally.
@@ -162,7 +162,7 @@ int pipeline_tts_duration_sec_to_tokens(const PipelineCodec * pc, float duration
 // the params struct, and fills `out` with mono float PCM at the codec sample
 // rate (24 kHz). Returns OV_STATUS_OK on success ; on failure returns a
 // negative ov_status describing the cause and leaves out empty. The whole
-// pipeline mirrors _post_process_audio in omnivoice.py : when no reference
+// pipeline mirrors _post_process_audio in omnivoice.py: when no reference
 // audio is provided the output is peak/0.5 normalised, when a reference is
 // provided its original RMS is threaded into post-proc to rescale the output
 // back to reference loudness.

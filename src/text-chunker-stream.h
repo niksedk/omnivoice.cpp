@@ -54,7 +54,7 @@ struct text_chunker_stream {
         return advance(all, false);
     }
 
-    // EOF drain : every chunk in the offline result is now stable. The
+    // EOF drain: every chunk in the offline result is now stable. The
     // look ahead pipeline runs to completion.
     std::vector<std::string> flush_eof() {
         std::vector<std::string> all = chunk_text_punctuation(buffer, chunk_len, 0);
@@ -70,7 +70,7 @@ struct text_chunker_stream {
     std::vector<std::string> advance(const std::vector<std::string> & all, bool eof) {
         std::vector<std::string> out;
 
-        // The last chunk of the offline result is open : a future sentence
+        // The last chunk of the offline result is open: a future sentence
         // could still extend it. Stop one before, except at EOF where the
         // last one is also stable.
         int n_stable = (int) all.size();
@@ -111,7 +111,7 @@ struct text_chunker_stream {
                 pending = pending + incoming;
                 continue;
             }
-            // Stable case : emit the pending, the incoming takes the slot.
+            // Stable case: emit the pending, the incoming takes the slot.
             out.push_back(pending);
             pending = incoming;
         }

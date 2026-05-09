@@ -92,7 +92,7 @@ static int utf8_codepoint(const char * s, int * advance) {
         *advance = 4;
         return ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
     }
-    // invalid lead byte : advance one and return the raw byte to avoid an
+    // invalid lead byte: advance one and return the raw byte to avoid an
     // infinite loop. The Python tokenizer never reaches this path since Python
     // str guarantees valid UTF 8 ; in C++ the std::string input has no such
     // guarantee, so this branch handles malformed input defensively.
@@ -580,7 +580,7 @@ static void encode_chunk(const BPETokenizer * tok, const std::string & chunk, st
     }
 }
 
-// Full encode : text -> token ids.
+// Full encode: text -> token ids.
 // Walks the text from left to right, matching any registered special token
 // verbatim. For each segment between specials, runs the GPT-2 byte-level
 // pre-tokenizer + BPE merges. The endoftext sentinel is auto-registered as

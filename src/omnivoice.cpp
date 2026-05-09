@@ -39,7 +39,7 @@ struct ov_context {
 };
 
 // Thread-local backing store for ov_last_error(). std::string sized once
-// per thread, grows on demand, never freed across calls : the std runtime
+// per thread, grows on demand, never freed across calls: the std runtime
 // reclaims it on thread exit. An empty string means "no error recorded on
 // this thread yet", which ov_last_error() exposes as "".
 static thread_local std::string g_last_error;
@@ -49,7 +49,7 @@ void ov_set_error_v(const char * fmt, va_list ap) {
         g_last_error.clear();
         return;
     }
-    // Two-pass vsnprintf : first call sizes the buffer, second writes the
+    // Two-pass vsnprintf: first call sizes the buffer, second writes the
     // message. va_copy keeps the original ap valid for the second pass.
     va_list ap2;
     va_copy(ap2, ap);
@@ -88,7 +88,7 @@ void ov_throw(const char * fmt, ...) {
 }
 
 // Process-wide log callback. Atomic so ov_log_set can replace it without
-// locking : write happens with memory_order_release, every reader sees a
+// locking: write happens with memory_order_release, every reader sees a
 // fully published callback pointer paired with its user_data slot.
 // std::atomic on a function pointer is lock-free on every platform we
 // target. user_data is a plain pointer because it is only ever published
@@ -221,7 +221,7 @@ struct ov_context * ov_init(const struct ov_init_params * params) {
 
     ov_log(OV_LOG_INFO, "[OmniVoice] omnivoice.cpp %s", ov_version());
 
-    // new ov_context() value-initialises every field : POD aggregates
+    // new ov_context() value-initialises every field: POD aggregates
     // (BackendPair, PipelineTTS, PipelineCodec) are zero-init, std
     // containers in BPETokenizer construct empty, codec_loaded falls to
     // false. Only VoiceDesign needs explicit population below.
@@ -311,7 +311,7 @@ enum ov_status ov_synthesize(struct ov_context * ov, const struct ov_tts_params 
         ov_log(OV_LOG_ERROR, "[OmniVoice] ov_synthesize requires a codec-loaded handle");
         return OV_STATUS_INVALID_PARAMS;
     }
-    // Defense in depth : the synthesis path normally reports failures via
+    // Defense in depth: the synthesis path normally reports failures via
     // ov_status return + ov_set_error. A future load-style throw or any
     // std::bad_alloc deep inside the GGML backend is caught here and
     // converted to OV_STATUS_GENERATE_FAILED so an exception never crosses

@@ -127,7 +127,7 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     int Nkv = c.n_kv_heads;
 
     // 1) Q/K/V projections (fused, partial, or separate). Output keeps the
-    // batch dim trailing : [(q|kv)_dim, S] in 3D mode, [(q|kv)_dim, S, B] in 4D.
+    // batch dim trailing: [(q|kv)_dim, S] in 3D mode, [(q|kv)_dim, S, B] in 4D.
     struct ggml_tensor *q, *k, *v;
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;

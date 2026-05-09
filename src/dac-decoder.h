@@ -1,9 +1,9 @@
 #pragma once
-// dac-decoder.h : DAC acoustic decoder for OmniVoice (GGML)
-// Mirrors acestep VAE structure : Snake + ConvTranspose1d (mul_mat + col2im_1d)
+// dac-decoder.h: DAC acoustic decoder for OmniVoice (GGML)
+// Mirrors acestep VAE structure: Snake + ConvTranspose1d (mul_mat + col2im_1d)
 // + 3 dilated residual units per block. 5 blocks upsample by 8 5 4 2 3 (= 960x).
-// Input  : latent [T_in, 256] f32  (output of fc2 fed with RVQ-decoded vectors)
-// Output : audio  [T_out, 1]  f32  with T_out = 960 * T_in
+// Input:  latent [T_in, 256] f32  (output of fc2 fed with RVQ-decoded vectors)
+// Output: audio  [T_out, 1]  f32  with T_out = 960 * T_in
 
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -25,7 +25,7 @@
 #define DAC_BLOCK_OUT_CH  { 512, 256, 128, 64, 32 }
 #define DAC_FINAL_CH      32
 
-// Snake activation : y = x + (1 / (alpha + 1e-9)) * sin(alpha * x)^2
+// Snake activation: y = x + (1 / (alpha + 1e-9)) * sin(alpha * x)^2
 // Stored as (a = alpha, inv_b = 1 / (alpha + 1e-9)). Emitted as the naive
 // mul -> sin -> sqr -> mul -> add chain; the GGML backend autofuse pass
 // rewrites it into the dedicated fused snake kernel where available.
@@ -34,7 +34,7 @@ struct DACSnake {
     struct ggml_tensor * inv_b;  // [1, C] f32, 1 / (alpha + 1e-9)
 };
 
-// One residual unit : snake1 -> conv1(k=7, dil=d) -> snake2 -> conv2(k=1) + skip
+// One residual unit: snake1 -> conv1(k=7, dil=d) -> snake2 -> conv2(k=1) + skip
 struct DACResUnit {
     DACSnake             s1, s2;
     struct ggml_tensor * c1w;  // [7, C, C] bf16, source layout (C, C, 7)
@@ -44,7 +44,7 @@ struct DACResUnit {
     int                  dilation;
 };
 
-// Decoder block : snake1 -> conv_t1 (upsample) -> 3 res_units
+// Decoder block: snake1 -> conv_t1 (upsample) -> 3 res_units
 struct DACBlock {
     DACSnake             s1;
     // ConvTranspose1d weight pre-permuted to ggml [IC, K*OC] for mul_mat.
@@ -203,7 +203,7 @@ static void dac_load_snake(DACSnake * s, const GGUFModel & gf, const std::string
     dac_load_alpha(s->inv_b, gf, name, true);
 }
 
-// Full load : creates tensors in a private ctx, allocates them on the backend,
+// Full load: creates tensors in a private ctx, allocates them on the backend,
 // then copies the data with the appropriate transforms.
 static bool dac_load(DACDecoder * d, const GGUFModel & gf, ggml_backend_t backend) {
     static const int strides[]   = DAC_BLOCK_STRIDES;
@@ -211,7 +211,7 @@ static bool dac_load(DACDecoder * d, const GGUFModel & gf, ggml_backend_t backen
     static const int out_chs[]   = DAC_BLOCK_OUT_CH;
     static const int dilations[] = DAC_RU_DILATIONS;
 
-    // Phase 1 : describe all tensors in a no_alloc context
+    // Phase 1: describe all tensors in a no_alloc context
     const int               n_tensors_max = 256;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params p             = { ctx_size, NULL, true };
@@ -253,7 +253,7 @@ static bool dac_load(DACDecoder * d, const GGUFModel & gf, ggml_backend_t backen
     d->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, DAC_FINAL_CH, 1);
     d->c2b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
 
-    // Phase 2 : allocate backend buffer for all tensors at once
+    // Phase 2: allocate backend buffer for all tensors at once
     d->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!d->weight_buf) {
         fprintf(stderr, "[DAC] FATAL: failed to allocate weight buffer\n");
@@ -261,7 +261,7 @@ static bool dac_load(DACDecoder * d, const GGUFModel & gf, ggml_backend_t backen
     }
     ggml_backend_buffer_set_usage(d->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : copy data from the GGUF mapping into the freshly-allocated
+    // Phase 3: copy data from the GGUF mapping into the freshly-allocated
     // tensors, with per-tensor transforms (snake reciprocal, ctw permutation).
     gf_load_conv_f16(d->c1w, gf, "acoustic_decoder.conv1.weight");
     dac_load_bias_f32(d->c1b, gf, "acoustic_decoder.conv1.bias");
@@ -315,7 +315,7 @@ static struct ggml_tensor * dac_snake(struct ggml_context * ctx, struct ggml_ten
     return ggml_add(ctx, x, t);                          // x + sin^2(a * x) * inv_b
 }
 
-// Conv1d : x [T_in, IC] -> [T_out, OC] with bias
+// Conv1d: x [T_in, IC] -> [T_out, OC] with bias
 static struct ggml_tensor * dac_conv1d(struct ggml_context * ctx,
                                        struct ggml_tensor *  w,  // bf16 [K, IC, OC]
                                        struct ggml_tensor *  b,  // f32  [OC] or NULL
@@ -336,9 +336,9 @@ static struct ggml_tensor * dac_conv1d(struct ggml_context * ctx,
 }
 
 // ConvTranspose1d via GEMM + col2im_1d
-// w   : pre-permuted [IC, K*OC] bf16
-// b   : [OC] f32 or NULL
-// x   : [T_in, IC]
+// w:   pre-permuted [IC, K*OC] bf16
+// b:   [OC] f32 or NULL
+// x:   [T_in, IC]
 // Returns [T_in * stride, OC] when output_pad = stride % 2 is honored via right-pad.
 static struct ggml_tensor * dac_conv_t1d(struct ggml_context * ctx,
                                          struct ggml_tensor *  w,
@@ -348,10 +348,10 @@ static struct ggml_tensor * dac_conv_t1d(struct ggml_context * ctx,
                                          int                   pad,
                                          int                   oc,
                                          int                   output_pad) {
-    // 1. transpose x : [T_in, IC] -> [IC, T_in] (contiguous copy)
+    // 1. transpose x: [T_in, IC] -> [IC, T_in] (contiguous copy)
     struct ggml_tensor * xt = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    // 2. mul_mat contracts over IC : col [K*OC, T_in]
+    // 2. mul_mat contracts over IC: col [K*OC, T_in]
     struct ggml_tensor * col = ggml_mul_mat(ctx, w, xt);
 
     // 3. col2im_1d scatters into [T_out_no_op, OC] with T_out_no_op = (T_in - 1)*stride + K - 2*pad
@@ -370,7 +370,7 @@ static struct ggml_tensor * dac_conv_t1d(struct ggml_context * ctx,
     return y;
 }
 
-// Residual unit forward : skip + conv2(snake2(conv1(snake1(x))))
+// Residual unit forward: skip + conv2(snake2(conv1(snake1(x))))
 // kernel=7 same-padding via pad = (k-1)*dilation/2 = 3*dilation
 static struct ggml_tensor * dac_res_unit(struct ggml_context * ctx,
                                          const DACResUnit *    ru,
@@ -388,7 +388,7 @@ static struct ggml_tensor * dac_res_unit(struct ggml_context * ctx,
 }
 
 // Build the full DAC decode graph
-// latent : [T_in, 256] f32  ->  audio : [T_out, 1] f32  with T_out = 960 * T_in
+// latent: [T_in, 256] f32  ->  audio: [T_out, 1] f32  with T_out = 960 * T_in
 //
 // `dump_stages`, when non-NULL, is filled with up to 7 named intermediate
 // tensors (initial conv1, post block 0..4, post final snake) so callers can
@@ -397,7 +397,7 @@ static struct ggml_tensor * dac_build_graph(struct ggml_context *               
                                             const DACDecoder *                  d,
                                             struct ggml_tensor *                latent,
                                             std::vector<struct ggml_tensor *> * dump_stages = nullptr) {
-    // initial conv1 : 256 -> 1024
+    // initial conv1: 256 -> 1024
     struct ggml_tensor * x = dac_conv1d(ctx, d->c1w, d->c1b, latent, 1, 3, 1);
     if (dump_stages) {
         ggml_set_name(x, "dac_after_conv1");

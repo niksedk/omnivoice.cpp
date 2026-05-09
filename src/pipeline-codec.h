@@ -1,5 +1,5 @@
 #pragma once
-// pipeline-codec.h : audio-tokenizer decode pipeline for OmniVoice.
+// pipeline-codec.h: audio-tokenizer decode pipeline for OmniVoice.
 // Loads the audio-tokenizer GGUF, holds RVQ + fc2 + DAC weights on the
 // backend, and exposes a one-shot decode call :
 //
@@ -35,12 +35,12 @@ struct PipelineCodec {
 
     // fc Linear post-concat acoustic+semantic in encode path. Loaded into the
     // shared wctx alongside RVQ and fc2.
-    //   fc_w : bf16 ne=(1024, 1024)
-    //   fc_b : f32  ne=(1024)
+    //   fc_w: bf16 ne=(1024, 1024)
+    //   fc_b: f32  ne=(1024)
     struct ggml_tensor * fc_w;
     struct ggml_tensor * fc_b;
 
-    // fc2 Linear : RVQ output 1024 -> DAC input 256
+    // fc2 Linear: RVQ output 1024 -> DAC input 256
     // Bias loaded as F32 (ggml_add CUDA needs F32/F16 on src1, same as DAC)
     struct ggml_tensor * fc2_w;  // bf16 ne=(1024, 256)
     struct ggml_tensor * fc2_b;  // f32  ne=(256)
@@ -67,7 +67,7 @@ struct PipelineCodec {
 bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair bp);
 
 // Decode RVQ codes into a mono 24 kHz waveform.
-//   codes : row-major i32, num_codebooks rows of n_frames each (T fast).
+//   codes: row-major i32, num_codebooks rows of n_frames each (T fast).
 // Returns audio of length n_frames * pc->hop_length, empty on failure.
 std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * codes, int num_codebooks, int n_frames);
 
@@ -81,7 +81,7 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
 //   fc Linear (1024 -> 1024)           -> projected        (1024, T)
 //   RVQ encode loop                    -> codes            (CB=8, T) i32
 // Returns codes flat in (CB, T) row-major, empty on failure.
-// dump_dir : when non null, writes ref-audio-16k and ref-hubert-features
+// dump_dir: when non null, writes ref-audio-16k and ref-hubert-features
 // debug binaries into that directory. Pass NULL to skip.
 std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
                                            const float *   audio_24k,

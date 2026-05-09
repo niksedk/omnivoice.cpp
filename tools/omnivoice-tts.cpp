@@ -1,4 +1,4 @@
-// omnivoice-tts.cpp : TTS CLI for OmniVoice.
+// omnivoice-tts.cpp: TTS CLI for OmniVoice.
 //
 // Default mode synthesises an audio WAV from the target text read on stdin.
 // Voice cloning is enabled by passing --ref-wav <path> and --ref-text <path>
@@ -261,7 +261,7 @@ static int run_tts_via_ov(const char * model_path,
         T_override = ov_duration_sec_to_tokens(ov, prompt_duration_sec);
     }
 
-    // Streaming detection : -o '-' writes a wide RIFF header to stdout up
+    // Streaming detection: -o '-' writes a wide RIFF header to stdout up
     // front and pipes encoded samples as the synthesis emits them. Any
     // other path uses the buffered route so the file gets accurate sizes
     // in its header.
@@ -328,7 +328,7 @@ static int run_tts_via_ov(const char * model_path,
             return 0;
         };
 
-        // Read loop : 4 KiB chunks, push to the incremental chunker, drain
+        // Read loop: 4 KiB chunks, push to the incremental chunker, drain
         // ready chunks, synth each. Block on stdin between reads, no
         // polling. Suitable for piped LLM output that produces bytes at
         // its own pace.
@@ -371,10 +371,10 @@ static int run_tts_via_ov(const char * model_path,
         return 0;
     }
 
-    // Buffered path : read full stdin, single ov_synthesize, write WAV file.
+    // Buffered path: read full stdin, single ov_synthesize, write WAV file.
     std::string text = read_stdin_text();
 
-    // Defaults mirror OmniVoiceGenerationConfig (Python) : num_step=32,
+    // Defaults mirror OmniVoiceGenerationConfig (Python): num_step=32,
     // guidance_scale=2.0, t_shift=0.1, layer_penalty_factor=5.0,
     // position_temperature=5.0, class_temperature=0.0. ov_tts_default_params
     // sets the lot ; the CLI seed lands on mg_seed below.
@@ -491,7 +491,7 @@ static int main_impl(int argc, char ** argv) {
         }
     }
 
-    // Mode resolution : llm_test_in OR maskgit_test_mode are debug, the
+    // Mode resolution: llm_test_in OR maskgit_test_mode are debug, the
     // default is full TTS synthesis. Modes are mutually exclusive.
     int n_debug = (llm_test_in ? 1 : 0) + (maskgit_test_mode ? 1 : 0);
     if (n_debug > 1) {
@@ -521,7 +521,7 @@ static int main_impl(int argc, char ** argv) {
         return 1;
     }
 
-    // Resolve sampling seed : -1 picks a fresh random seed from std::random_device,
+    // Resolve sampling seed: -1 picks a fresh random seed from std::random_device,
     // any other value is used verbatim for reproducible runs across the maskgit
     // RNG.
     uint64_t seed_resolved = (seed_arg < 0) ? (uint64_t) std::random_device{}() : (uint64_t) seed_arg;
@@ -586,8 +586,8 @@ static int main_impl(int argc, char ** argv) {
             if (!pipeline_tts_resolve_instruct(&vd, text, raw_instruct, &instruct)) {
                 rc = 1;
             } else {
-                // Resolve target frame count : explicit --duration in seconds
-                // (OmniVoice runs at a fixed 25 fps : 24000 / 960), otherwise
+                // Resolve target frame count: explicit --duration in seconds
+                // (OmniVoice runs at a fixed 25 fps: 24000 / 960), otherwise
                 // estimate from text via the byte-perfect RuleDurationEstimator
                 // mirror. The codec is not loaded in this debug mode, so the
                 // 25 fps frame rate is hardcoded here rather than read from
@@ -626,7 +626,7 @@ static int main_impl(int argc, char ** argv) {
 }
 
 int main(int argc, char ** argv) {
-    // Top-level boundary : the lib now signals fatal load errors via
+    // Top-level boundary: the lib now signals fatal load errors via
     // exceptions instead of exit(1). The TTS path goes through ov_init
     // which catches them internally, but the lower-level debug paths
     // (--llm-test, --maskgit-test) call pipeline_tts_load directly and

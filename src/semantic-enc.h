@@ -1,5 +1,5 @@
 #pragma once
-// semantic-enc.h : SemanticEncoder for OmniVoice (GGML)
+// semantic-enc.h: SemanticEncoder for OmniVoice (GGML)
 //
 // Refines the per-frame HuBERT semantic features [768, T] into the same
 // shape with a chain of residual ELU + Conv1d blocks. The output is
@@ -16,10 +16,10 @@
 //       conv(768 -> 768, k=3, stride=1, p=1, with bias)
 //
 // All channel counts stay at 768. Stride 1 means there is no temporal
-// downsample : T_out == T_in == T_sem. The SemanticDecoder mirror is not
+// downsample: T_out == T_in == T_sem. The SemanticDecoder mirror is not
 // needed at inference time and is excluded from the GGUF entirely.
 //
-// Input / output : [T, 768] f32 in GGML layout (T fast, 768 slow), matching
+// Input / output: [T, 768] f32 in GGML layout (T fast, 768 slow), matching
 // what dac_conv1d expects so the DAC helpers can be reused as-is.
 
 #include "dac-decoder.h"  // for dac_conv1d, dac_load_bias_f32
@@ -43,7 +43,7 @@ struct SemanticResUnit {
     int                  dilation;
 };
 
-// One block : SEM_RES_UNITS residual units then a final stride-1 conv with bias.
+// One block: SEM_RES_UNITS residual units then a final stride-1 conv with bias.
 struct SemanticEncBlock {
     SemanticResUnit      ru[SEM_RES_UNITS];
     struct ggml_tensor * cw;  // [3, 768, 768] bf16
@@ -60,13 +60,13 @@ struct SemanticEncoder {
     ggml_backend_buffer_t weight_buf;
 };
 
-// Full load : describe -> alloc -> fill, mirror of dac_load with no per-tensor
+// Full load: describe -> alloc -> fill, mirror of dac_load with no per-tensor
 // transform other than the F32 cast on the per-block conv biases (so the
 // CUDA add op accepts them as src1).
 static bool sem_enc_load(SemanticEncoder * d, const GGUFModel & gf, ggml_backend_t backend) {
     static const int dilations[] = SEM_BLOCK_DILATIONS;
 
-    // Phase 1 : describe
+    // Phase 1: describe
     const int               n_tensors_max = 64;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params p             = { ctx_size, NULL, true };
@@ -90,7 +90,7 @@ static bool sem_enc_load(SemanticEncoder * d, const GGUFModel & gf, ggml_backend
         b.cb = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, SEM_HIDDEN);
     }
 
-    // Phase 2 : alloc backend
+    // Phase 2: alloc backend
     d->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!d->weight_buf) {
         fprintf(stderr, "[Sem-Enc] FATAL: failed to allocate weight buffer\n");
@@ -98,7 +98,7 @@ static bool sem_enc_load(SemanticEncoder * d, const GGUFModel & gf, ggml_backend
     }
     ggml_backend_buffer_set_usage(d->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : fill (passthrough bf16 + F32 cast for biases)
+    // Phase 3: fill (passthrough bf16 + F32 cast for biases)
     gf_load_conv_f16(d->c1w, gf, "encoder_semantic.conv.weight");
 
     for (int i = 0; i < SEM_NUM_BLOCKS; i++) {
@@ -130,7 +130,7 @@ static void sem_enc_free(SemanticEncoder * d) {
     }
 }
 
-// One residual unit : ELU -> conv1 -> ELU -> conv2 + skip
+// One residual unit: ELU -> conv1 -> ELU -> conv2 + skip
 // Same-padding for both convs (pad = (k-1)*dil/2). conv1 k=3 dil=1 -> pad=1 ;
 // conv2 k=1 -> pad=0. No bias on either conv (passed as NULL to dac_conv1d).
 static struct ggml_tensor * sem_res_unit(struct ggml_context *   ctx,
@@ -151,7 +151,7 @@ static struct ggml_tensor * sem_enc_build_graph(struct ggml_context *   ctx,
                                                 const SemanticEncoder * d,
                                                 struct ggml_tensor *    x  // [T, 768] f32
 ) {
-    // initial conv : 768 -> 768, k=3, p=1, no bias
+    // initial conv: 768 -> 768, k=3, p=1, no bias
     x = dac_conv1d(ctx, d->c1w, NULL, x, 1, 1, 1);
 
     for (int i = 0; i < SEM_NUM_BLOCKS; i++) {
@@ -159,7 +159,7 @@ static struct ggml_tensor * sem_enc_build_graph(struct ggml_context *   ctx,
         for (int r = 0; r < SEM_RES_UNITS; r++) {
             x = sem_res_unit(ctx, &b.ru[r], x);
         }
-        // post-block conv : same channels, stride 1, k=3, p=1, with bias
+        // post-block conv: same channels, stride 1, k=3, p=1, with bias
         x = dac_conv1d(ctx, b.cw, b.cb, x, 1, 1, 1);
     }
     return x;  // [T, 768]

@@ -1,5 +1,5 @@
 #pragma once
-// hubert-enc.h : HuBERT encoder for OmniVoice (GGML)
+// hubert-enc.h: HuBERT encoder for OmniVoice (GGML)
 //
 // HuBERT base model used as the semantic feature extractor inside the
 // HiggsAudioV2 audio_tokenizer. The full module produces 13 hidden states
@@ -9,19 +9,19 @@
 //
 // Pipeline reference (from transformers HiggsAudioV2Tokenizer) :
 //   wav 24k -> resample 16k -> F.pad(160, 160)
-//   feature_extractor    : 7 conv layers, cumul stride 320, 1 -> 512 channels
-//   feature_projection   : LayerNorm(512) + Linear(512, 768)
-//   pos_conv_embed       : grouped Conv1d (groups=16, k=128) + GELU + LayerNorm
-//   12 x HubertLayer     : Post-LN attention + FFN (gelu)
-//   final layer_norm     : LayerNorm(768)
-//   stack + mean + ::2   : [B, 13, T_h, 768] -> [B, T_h/2, 768]
+//   feature_extractor:    7 conv layers, cumul stride 320, 1 -> 512 channels
+//   feature_projection:   LayerNorm(512) + Linear(512, 768)
+//   pos_conv_embed:       grouped Conv1d (groups=16, k=128) + GELU + LayerNorm
+//   12 x HubertLayer:     Post-LN attention + FFN (gelu)
+//   final layer_norm:     LayerNorm(768)
+//   stack + mean + ::2:   [B, 13, T_h, 768] -> [B, T_h/2, 768]
 //
 // Stage 1 ports the feature_extractor only. Layer 0 carries an InstanceNorm
 // equivalent (HF feat_extract_norm = "group", num_groups == num_channels,
 // affine=True) followed by GELU. Layers 1 to 6 are conv + GELU only. All
 // convs use valid padding (pad = 0) and conv_bias = False.
 //
-// I/O layout : audio in is [T_audio, 1] f32 (T fast, IC=1 slow), output is
+// I/O layout: audio in is [T_audio, 1] f32 (T fast, IC=1 slow), output is
 // [T_out, 512] f32 in GGML layout matching dac_conv1d output convention.
 
 #include "dac-decoder.h"  // dac_conv1d, dac_load_passthrough, dac_load_bias_f32
@@ -83,7 +83,7 @@ static bool hubert_feat_load(HubertFeatExtractor * h, const GGUFModel & gf, ggml
     static const int S[] = HUBERT_FEAT_STRIDES;
     static const int D[] = HUBERT_FEAT_DIMS;
 
-    // Phase 1 : describe
+    // Phase 1: describe
     const int               n_tensors_max = 32;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params p             = { ctx_size, NULL, true };
@@ -110,7 +110,7 @@ static bool hubert_feat_load(HubertFeatExtractor * h, const GGUFModel & gf, ggml
         prev_dim = D[i];
     }
 
-    // Phase 2 : alloc backend
+    // Phase 2: alloc backend
     h->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!h->weight_buf) {
         fprintf(stderr, "[HuBERT-Feat] FATAL: failed to allocate weight buffer\n");
@@ -118,7 +118,7 @@ static bool hubert_feat_load(HubertFeatExtractor * h, const GGUFModel & gf, ggml
     }
     ggml_backend_buffer_set_usage(h->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : fill (bf16 passthrough for convs, F32 cast for affine GroupNorm params).
+    // Phase 3: fill (bf16 passthrough for convs, F32 cast for affine GroupNorm params).
     for (int i = 0; i < HUBERT_FEAT_NUM_LAYERS; i++) {
         HubertFeatLayer & L  = h->layers[i];
         std::string       pf = "semantic_model.feature_extractor.conv_layers." + std::to_string(i);
@@ -147,8 +147,8 @@ static void hubert_feat_free(HubertFeatExtractor * h) {
 
 // Build feature_extractor graph. Input [T_audio, 1] f32, output [T_out, 512] f32.
 // HF HuBERT uses valid padding (pad = 0) and dilation 1 on every conv.
-// Layer 0 : conv -> GroupNorm(G == C, affine) -> GELU
-// Layer 1..6 : conv -> GELU
+// Layer 0: conv -> GroupNorm(G == C, affine) -> GELU
+// Layer 1..6: conv -> GELU
 static struct ggml_tensor * hubert_feat_build_graph(struct ggml_context *       ctx,
                                                     const HubertFeatExtractor * h,
                                                     struct ggml_tensor *        x  // [T_audio, 1] f32
@@ -176,7 +176,7 @@ static struct ggml_tensor * hubert_feat_build_graph(struct ggml_context *       
     return x;
 }
 
-// feature_projection : LayerNorm(conv_dim_last=512) + Linear(512 -> 768).
+// feature_projection: LayerNorm(conv_dim_last=512) + Linear(512 -> 768).
 // HuBERT applies it on the [B, T, 512] post-feature_extractor tensor with a
 // channel-axis LayerNorm (last dim) and a Linear projection without dropout
 // at inference time. We run the whole stage in C-first layout (C, T) so
@@ -194,7 +194,7 @@ struct HubertFeatProjection {
 };
 
 static bool hubert_proj_load(HubertFeatProjection * p, const GGUFModel & gf, ggml_backend_t backend) {
-    // Phase 1 : describe
+    // Phase 1: describe
     const int               n_tensors_max = 8;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params gp            = { ctx_size, NULL, true };
@@ -207,7 +207,7 @@ static bool hubert_proj_load(HubertFeatProjection * p, const GGUFModel & gf, ggm
                                    HUBERT_PROJ_IN, HUBERT_PROJ_OUT);
     p->proj_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_PROJ_OUT);
 
-    // Phase 2 : alloc backend
+    // Phase 2: alloc backend
     p->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!p->weight_buf) {
         fprintf(stderr, "[HuBERT-Proj] FATAL: failed to allocate weight buffer\n");
@@ -215,7 +215,7 @@ static bool hubert_proj_load(HubertFeatProjection * p, const GGUFModel & gf, ggm
     }
     ggml_backend_buffer_set_usage(p->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : fill (BF16 passthrough for the projection matrix, F32 cast for
+    // Phase 3: fill (BF16 passthrough for the projection matrix, F32 cast for
     // the affine LN params and the projection bias so ggml_add stays on the
     // CUDA-supported F32/F16 src1 path).
     dac_load_bias_f32(p->ln_w, gf, "semantic_model.feature_projection.layer_norm.weight");
@@ -253,22 +253,22 @@ static struct ggml_tensor * hubert_proj_build_graph(struct ggml_context *       
     struct ggml_tensor * b2 = ggml_reshape_2d(ctx, p->ln_b, HUBERT_PROJ_IN, 1);
     x                       = ggml_mul(ctx, x, w2);
     x                       = ggml_add(ctx, x, b2);
-    // Bisect tap : output of the LN, before the 512 -> 768 Linear. Layout
+    // Bisect tap: output of the LN, before the 512 -> 768 Linear. Layout
     // is (C=512, T) ne which dump_tap will write as numpy (T, 512), matching
     // the HF feature_projection.layer_norm forward hook.
     if (out_post_ln) {
         *out_post_ln = x;
     }
-    // Linear : (in=512, T) @ proj_w (in=512, out=768) -> (out=768, T)
+    // Linear: (in=512, T) @ proj_w (in=512, out=768) -> (out=768, T)
     x                       = ggml_mul_mat(ctx, p->proj_w, x);
     struct ggml_tensor * pb = ggml_reshape_2d(ctx, p->proj_b, HUBERT_PROJ_OUT, 1);
     x                       = ggml_add(ctx, x, pb);
     return x;
 }
 
-// HuBERT transformer encoder layer (Post-LN flavor : do_stable_layer_norm = false).
+// HuBERT transformer encoder layer (Post-LN flavor: do_stable_layer_norm = false).
 // Standard multi-head self-attention + feed-forward, no causal mask, bidirectional.
-// All operations stay in C-first layout : input and output [768, T] f32.
+// All operations stay in C-first layout: input and output [768, T] f32.
 //
 // Forward (HubertEncoderLayer.forward in transformers) :
 //   r  = x
@@ -314,7 +314,7 @@ struct HubertLayer {
 };
 
 static bool hubert_layer_load(HubertLayer * L, const GGUFModel & gf, ggml_backend_t backend, int idx) {
-    // Phase 1 : describe (16 tensors)
+    // Phase 1: describe (16 tensors)
     const int               n_tensors_max = 32;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params gp            = { ctx_size, NULL, true };
@@ -323,7 +323,7 @@ static bool hubert_layer_load(HubertLayer * L, const GGUFModel & gf, ggml_backen
 
     std::string lp = "semantic_model.encoder.layers." + std::to_string(idx) + ".";
 
-    // Attention : 4 Linear(768, 768) with bias
+    // Attention: 4 Linear(768, 768) with bias
     L->attn.qw = ggml_new_tensor_2d(ctx, gf_get_type(gf, lp + "attention.q_proj.weight"), HUBERT_HIDDEN, HUBERT_HIDDEN);
     L->attn.qb = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_HIDDEN);
     L->attn.kw = ggml_new_tensor_2d(ctx, gf_get_type(gf, lp + "attention.k_proj.weight"), HUBERT_HIDDEN, HUBERT_HIDDEN);
@@ -334,7 +334,7 @@ static bool hubert_layer_load(HubertLayer * L, const GGUFModel & gf, ggml_backen
         ggml_new_tensor_2d(ctx, gf_get_type(gf, lp + "attention.out_proj.weight"), HUBERT_HIDDEN, HUBERT_HIDDEN);
     L->attn.ob = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_HIDDEN);
 
-    // FFN : Linear(768, 3072) + Linear(3072, 768) with bias
+    // FFN: Linear(768, 3072) + Linear(3072, 768) with bias
     L->ffn.fc1_w = ggml_new_tensor_2d(ctx, gf_get_type(gf, lp + "feed_forward.intermediate_dense.weight"),
                                       HUBERT_HIDDEN, HUBERT_FFN_INNER);
     L->ffn.fc1_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_FFN_INNER);
@@ -348,7 +348,7 @@ static bool hubert_layer_load(HubertLayer * L, const GGUFModel & gf, ggml_backen
     L->ln_final.w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_HIDDEN);
     L->ln_final.b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_HIDDEN);
 
-    // Phase 2 : alloc backend
+    // Phase 2: alloc backend
     L->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!L->weight_buf) {
         fprintf(stderr, "[HuBERT-Layer%d] FATAL: failed to allocate weight buffer\n", idx);
@@ -356,7 +356,7 @@ static bool hubert_layer_load(HubertLayer * L, const GGUFModel & gf, ggml_backen
     }
     ggml_backend_buffer_set_usage(L->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : fill (BF16 passthrough on Linear weights, F32 cast on biases and LN params).
+    // Phase 3: fill (BF16 passthrough on Linear weights, F32 cast on biases and LN params).
     std::string p = "semantic_model.encoder.layers." + std::to_string(idx) + ".";
     dac_load_passthrough(L->attn.qw, gf, p + "attention.q_proj.weight");
     dac_load_bias_f32(L->attn.qb, gf, p + "attention.q_proj.bias");
@@ -391,7 +391,7 @@ static void hubert_layer_free(HubertLayer * L) {
     }
 }
 
-// LayerNorm helper : in/out [C, T] f32 with C on ne[0] (fast). ggml_norm
+// LayerNorm helper: in/out [C, T] f32 with C on ne[0] (fast). ggml_norm
 // normalizes along ne[0] = C, then we scale + shift via broadcast over T.
 static struct ggml_tensor * hubert_apply_ln(struct ggml_context *       ctx,
                                             struct ggml_tensor *        x,
@@ -419,9 +419,9 @@ static struct ggml_tensor * hubert_linear(struct ggml_context * ctx,
 
 // Multi-head self-attention. Input/output [768, T] f32 C-first. No mask, no
 // causal (bidirectional). Heads layout follows the llama.cpp convention :
-//   q : (D, T, H) for Q
-//   k : (D, T, H) for K -> ggml_mul_mat(K, Q) returns scores (T_k, T_q, H)
-//   v : (T, D, H) so ggml_mul_mat(V, scores) returns out (D, T_q, H)
+//   q: (D, T, H) for Q
+//   k: (D, T, H) for K -> ggml_mul_mat(K, Q) returns scores (T_k, T_q, H)
+//   v: (T, D, H) so ggml_mul_mat(V, scores) returns out (D, T_q, H)
 static struct ggml_tensor * hubert_attention(struct ggml_context *   ctx,
                                              const HubertAttention & a,
                                              struct ggml_tensor *    x,  // [768, T]
@@ -438,13 +438,13 @@ static struct ggml_tensor * hubert_attention(struct ggml_context *   ctx,
     k = ggml_reshape_3d(ctx, k, D, H, T);
     v = ggml_reshape_3d(ctx, v, D, H, T);
 
-    // ggml_permute convention : new_ne[axis_i] = old_ne[i].
-    // Q, K : (D, H, T) -> (D, T, H). new_ne[0]=D=old_ne[0], new_ne[1]=T=old_ne[2],
+    // ggml_permute convention: new_ne[axis_i] = old_ne[i].
+    // Q, K: (D, H, T) -> (D, T, H). new_ne[0]=D=old_ne[0], new_ne[1]=T=old_ne[2],
     // new_ne[2]=H=old_ne[1] -> axis args (0, 2, 1, 3).
     q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
     k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
 
-    // V : (D, H, T) -> (T, D, H). new_ne[0]=T=old_ne[2], new_ne[1]=D=old_ne[0],
+    // V: (D, H, T) -> (T, D, H). new_ne[0]=T=old_ne[2], new_ne[1]=D=old_ne[0],
     // new_ne[2]=H=old_ne[1] -> axis args (1, 2, 0, 3).
     v = ggml_cont(ctx, ggml_permute(ctx, v, 1, 2, 0, 3));
 
@@ -465,7 +465,7 @@ static struct ggml_tensor * hubert_attention(struct ggml_context *   ctx,
     return out;
 }
 
-// FFN : Linear(768 -> 3072) + GELU(exact erf) + Linear(3072 -> 768).
+// FFN: Linear(768 -> 3072) + GELU(exact erf) + Linear(3072 -> 768).
 // hidden_act = "gelu" maps to torch.nn.functional.gelu(approximate='none').
 static struct ggml_tensor * hubert_ffn(struct ggml_context * ctx,
                                        const HubertFFN &     f,
@@ -526,7 +526,7 @@ struct HubertPosConv {
 };
 
 static bool hubert_pos_conv_load(HubertPosConv * h, const GGUFModel & gf, ggml_backend_t backend) {
-    // Phase 1 : describe
+    // Phase 1: describe
     const int               n_tensors_max = 4;
     size_t                  ctx_size      = (size_t) n_tensors_max * ggml_tensor_overhead() + 1024;
     struct ggml_init_params gp            = { ctx_size, NULL, true };
@@ -536,7 +536,7 @@ static bool hubert_pos_conv_load(HubertPosConv * h, const GGUFModel & gf, ggml_b
     h->w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, HUBERT_POS_K, HUBERT_POS_IC_PG, HUBERT_HIDDEN);
     h->b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, HUBERT_HIDDEN);
 
-    // Phase 2 : alloc backend
+    // Phase 2: alloc backend
     h->weight_buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
     if (!h->weight_buf) {
         fprintf(stderr, "[HuBERT-PosConv] FATAL: failed to allocate weight buffer\n");
@@ -544,7 +544,7 @@ static bool hubert_pos_conv_load(HubertPosConv * h, const GGUFModel & gf, ggml_b
     }
     ggml_backend_buffer_set_usage(h->weight_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
-    // Phase 3 : F16 cast on the conv kernel (ARM im2col strict), F32 cast on bias.
+    // Phase 3: F16 cast on the conv kernel (ARM im2col strict), F32 cast on bias.
     gf_load_conv_f16(h->w, gf, "semantic_model.encoder.pos_conv_embed.conv.weight");
     dac_load_bias_f32(h->b, gf, "semantic_model.encoder.pos_conv_embed.conv.bias");
 
@@ -566,7 +566,7 @@ static void hubert_pos_conv_free(HubertPosConv * h) {
 // Steps mirror the reference HubertPositionalConvEmbedding.forward :
 //   transpose(C, T) -> (T, C)
 //   16 grouped conv1d slices  -> concat -> (T+1, 768)   (k even, padding=64)
-//   SamePad : drop trailing sample -> (T, 768)
+//   SamePad: drop trailing sample -> (T, 768)
 //   GELU exact
 //   transpose back -> (768, T)
 static struct ggml_tensor * hubert_pos_conv_build_graph(struct ggml_context * ctx,
@@ -578,7 +578,7 @@ static struct ggml_tensor * hubert_pos_conv_build_graph(struct ggml_context * ct
     // Switch to T-first layout to match dac_conv1d expectations (T, IC).
     x = ggml_cont(ctx, ggml_transpose(ctx, x));  // (T, 768)
 
-    // Group input channels : (T, 768) -> (T, 48, 16) so each group of 48
+    // Group input channels: (T, 768) -> (T, 48, 16) so each group of 48
     // input channels lives on ne[2]. The view stride on ne[1] is the
     // contiguous channel stride from the source layout.
     struct ggml_tensor * x3 = ggml_reshape_3d(ctx, x, T, HUBERT_POS_IC_PG, HUBERT_POS_GROUPS);
@@ -608,9 +608,9 @@ static struct ggml_tensor * hubert_pos_conv_build_graph(struct ggml_context * ct
     for (int g = 1; g < HUBERT_POS_GROUPS; g++) {
         y = ggml_concat(ctx, y, outs[g], 1);
     }
-    // y : (T+1, 768). T_out = T - K + 2*PAD + 1 = T + 1 (k even).
+    // y: (T+1, 768). T_out = T - K + 2*PAD + 1 = T + 1 (k even).
 
-    // SamePad : drop the trailing sample on the time axis ne[0]. We need a
+    // SamePad: drop the trailing sample on the time axis ne[0]. We need a
     // contiguous tensor for ggml_gelu_erf and the next transpose, so cont.
     y = ggml_cont(ctx, ggml_view_2d(ctx, y, T, HUBERT_HIDDEN, y->nb[1], 0));
 
@@ -620,7 +620,7 @@ static struct ggml_tensor * hubert_pos_conv_build_graph(struct ggml_context * ct
     return ggml_cont(ctx, ggml_transpose(ctx, y));
 }
 
-// Initial encoder block : pos_conv_embed (residual add) + first LayerNorm.
+// Initial encoder block: pos_conv_embed (residual add) + first LayerNorm.
 //   x = x + pos_conv_embed(x)
 //   x = layer_norm(x)
 // Holds the pos_conv weights and the LN params side by side. The 12 transformer

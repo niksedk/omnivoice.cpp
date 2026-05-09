@@ -84,7 +84,7 @@ static const std::set<std::string> & chunker_abbreviations() {
 }
 
 // Returns true if cp (a UTF-8 codepoint string) is whitespace per Python's
-// str.split() / str.strip() definition : ASCII (\t \n \v \f \r space) plus
+// str.split() / str.strip() definition: ASCII (\t \n \v \f \r space) plus
 // the Unicode whitespace block. Mirrors str.isspace() semantics on the
 // codepoints produced by tokenising text into characters.
 static bool chunker_is_unicode_whitespace(const std::string & cp) {
@@ -140,7 +140,7 @@ static bool chunker_is_unicode_whitespace(const std::string & cp) {
 
 // Returns the last whitespace-delimited word of s, or s itself if no
 // whitespace. Used to detect abbreviation periods. Matches Python
-// str.split()[-1] semantics : whitespace is the Unicode whitespace block,
+// str.split()[-1] semantics: whitespace is the Unicode whitespace block,
 // not just ASCII, so a non-breaking space before "Mr." still detects the
 // abbreviation.
 static std::string chunker_last_word(const std::string & s) {
@@ -185,7 +185,7 @@ static std::string chunker_last_word(const std::string & s) {
 }
 
 // Strips leading and trailing Unicode whitespace from s. Matches Python
-// str.strip() : ASCII whitespace plus NBSP, ideographic space, thin
+// str.strip(): ASCII whitespace plus NBSP, ideographic space, thin
 // spaces, BOM and the rest of the Unicode whitespace block.
 static std::string chunker_strip(const std::string & s) {
     const unsigned char * p   = (const unsigned char *) s.data();

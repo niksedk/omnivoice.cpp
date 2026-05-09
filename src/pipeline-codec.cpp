@@ -1,4 +1,4 @@
-// pipeline-codec.cpp : decode-side audio tokenizer pipeline.
+// pipeline-codec.cpp: decode-side audio tokenizer pipeline.
 //
 // Graph (fast axis ne[0] explicit) :
 //   codes      [T, 8]      i32   ->  rvq_decode_graph
@@ -47,7 +47,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
         return false;
     }
 
-    // RVQ : 8 codebooks * 5 tensors (embed + project_in w/b + project_out w/b)
+    // RVQ: 8 codebooks * 5 tensors (embed + project_in w/b + project_out w/b)
     // = 40, plus fc2 weight + bias and fc weight + bias = 44. We pad to 64 for headroom.
     wctx_init(&pc->wctx, 64);
 
@@ -58,7 +58,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
     }
 
     pc->fc2_w = gf_load_tensor(&pc->wctx, pc->gguf, "fc2.weight");
-    // F32 cast at load : ggml_add CUDA only accepts src1 in F32 or F16.
+    // F32 cast at load: ggml_add CUDA only accepts src1 in F32 or F16.
     pc->fc2_b = gf_load_tensor_f32(&pc->wctx, pc->gguf, "fc2.bias");
     if (!pc->fc2_w || !pc->fc2_b) {
         ov_log(OV_LOG_ERROR, "[PipelineCodec] missing fc2.weight or fc2.bias");
@@ -112,7 +112,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
         return false;
     }
 
-    // HuBERT feature_extractor : 7 conv stack with GroupNorm on layer 0 and
+    // HuBERT feature_extractor: 7 conv stack with GroupNorm on layer 0 and
     // GELU on every layer. Cumulative stride 320 over 16 kHz audio.
     if (!hubert_feat_load(&pc->hubert_feat, pc->gguf, backend)) {
         sem_enc_free(&pc->sem_enc);
@@ -123,7 +123,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
         return false;
     }
 
-    // HuBERT feature_projection : LN(512) + Linear(512, 768). Bridges the
+    // HuBERT feature_projection: LN(512) + Linear(512, 768). Bridges the
     // feature_extractor (T fast layout) to the transformer encoder which
     // operates in C-first layout (C fast, T slow).
     if (!hubert_proj_load(&pc->hubert_proj, pc->gguf, backend)) {
@@ -136,7 +136,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
         return false;
     }
 
-    // HuBERT encoder init block : grouped pos_conv_embed (residual add) +
+    // HuBERT encoder init block: grouped pos_conv_embed (residual add) +
     // first LayerNorm. Sits between feature_projection and the 12-layer stack.
     if (!hubert_enc_init_load(&pc->hubert_enc_init, pc->gguf, backend)) {
         hubert_proj_free(&pc->hubert_proj);
@@ -149,7 +149,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
         return false;
     }
 
-    // HuBERT transformer encoder : 12 Post-LN layers loaded in sequence. Each
+    // HuBERT transformer encoder: 12 Post-LN layers loaded in sequence. Each
     // layer owns its own backend buffer for clean lifecycle. On failure at
     // index i, we unwind layers [0, i) before the rest of the chain.
     for (int i = 0; i < HUBERT_NUM_LAYERS; i++) {
@@ -180,7 +180,7 @@ bool pipeline_codec_load(PipelineCodec * pc, const char * gguf_path, BackendPair
 
     ov_log(OV_LOG_INFO, "[PipelineCodec] Loaded codec: sr=%d hop=%d backend=%s", pc->sample_rate, pc->hop_length,
            ggml_backend_name(backend));
-    // Scheduler : routes ops the GPU backend cannot run (e.g. K-quant
+    // Scheduler: routes ops the GPU backend cannot run (e.g. K-quant
     // get_rows on CUDA) to the CPU backend. 4096 nodes covers HuBERT 12L
     // + DAC encoder + DAC decoder graphs.
     pc->sched = backend_sched_new(bp, 4096);
@@ -202,7 +202,7 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
         return {};
     }
 
-    // Compute graph context : holds tensor descriptors for the forward pass.
+    // Compute graph context: holds tensor descriptors for the forward pass.
     // 4096 nodes leaves ample headroom (DAC alone has ~150 ops).
     const int    n_max_nodes    = 4096;
     const size_t graph_ctx_size = ggml_tensor_overhead() * n_max_nodes + ggml_graph_overhead_custom(n_max_nodes, false);
@@ -214,12 +214,12 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
         return {};
     }
 
-    // Input : codes [T, 8] i32, ne[0]=T fast
+    // Input: codes [T, 8] i32, ne[0]=T fast
     struct ggml_tensor * codes_in = ggml_new_tensor_2d(gctx, GGML_TYPE_I32, n_frames, num_codebooks);
     ggml_set_name(codes_in, "codes_in");
     ggml_set_input(codes_in);
 
-    // RVQ : codes [T, 8] -> latent [1024, T]
+    // RVQ: codes [T, 8] -> latent [1024, T]
     struct ggml_tensor * latent = rvq_decode_graph(gctx, &pc->rvq, codes_in);
     ggml_set_name(latent, "rvq_out");
 
@@ -229,18 +229,18 @@ std::vector<float> pipeline_codec_decode(PipelineCodec * pc, const int32_t * cod
     //   result     ne=(M=256, N=T)        ne[0]=256=channels fast, ne[1]=T slow
     struct ggml_tensor * h = ggml_mul_mat(gctx, pc->fc2_w, latent);
 
-    // 1D bias broadcast : fc2_b ne=(256) lines up with h.ne[0]=256, broadcasts
+    // 1D bias broadcast: fc2_b ne=(256) lines up with h.ne[0]=256, broadcasts
     // across ne[1]=T. Same pattern as the RVQ project_out_b add.
     h = ggml_add(gctx, h, pc->fc2_b);
     ggml_set_name(h, "fc2_out");
 
-    // Stable reference for the optional dump : `h` is about to be reassigned
+    // Stable reference for the optional dump: `h` is about to be reassigned
     // by cont(transpose), and only the original fc2_out tensor will be marked
     // as output. The post-transpose tensor would be reused by the gallocr
     // once DAC consumes it.
     struct ggml_tensor * fc2_out = h;
 
-    // Optional debug : keep RVQ and fc2 outputs alive across the graph compute
+    // Optional debug: keep RVQ and fc2 outputs alive across the graph compute
     // so we can copy them back. Without this the gallocr is free to reuse
     // their backing memory once consumed downstream.
     const bool dump = std::getenv("OMNIVOICE_DUMP_STAGES") != NULL;
@@ -340,7 +340,7 @@ static int compute_dac_output_length(int n_samples) {
     return T;
 }
 
-// Forward declarations for the encode pipeline helpers : isolated graphs
+// Forward declarations for the encode pipeline helpers: isolated graphs
 // chained together by pipeline_codec_encode.
 static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc,
                                                               const float *   audio_f32,
@@ -357,7 +357,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         return {};
     }
 
-    // Step 1 : resample 24 kHz -> 16 kHz mono and pad with 160 zeros on each
+    // Step 1: resample 24 kHz -> 16 kHz mono and pad with 160 zeros on each
     // side, matching HiggsAudioV2 _extract_semantic_features.
     int     n_16k     = 0;
     float * resampled = audio_resample(audio_24k, n_samples, pc->sample_rate, 16000, 1, &n_16k);
@@ -375,7 +375,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
     std::memcpy(audio_16k_padded.data() + 160, resampled, (size_t) n_16k * sizeof(float));
     free(resampled);
 
-    // Step 2 : full HuBERT features pipeline -> e_semantic_input (768, T_s).
+    // Step 2: full HuBERT features pipeline -> e_semantic_input (768, T_s).
     std::vector<float> features = pipeline_codec_hubert_features_test(pc, audio_16k_padded.data(), n_padded, dump_dir);
     if (features.empty()) {
         return {};
@@ -391,7 +391,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
     // hubert_features returns ne=(768, T_s) with K fast (768 axis). sem_enc
     // graph input expects ne=(T_s, 768) with T fast (dac_conv1d layout, mirror
     // of the reference encoder_semantic which receives sem_in.transpose(1,2)
-    // before the conv stack). Transpose the flat buffer : K-fast to T-fast.
+    // before the conv stack). Transpose the flat buffer: K-fast to T-fast.
     std::vector<float> features_t(features.size());
     for (int t = 0; t < T_s; t++) {
         for (int k = 0; k < SEM_HIDDEN; k++) {
@@ -399,14 +399,14 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         }
     }
 
-    // Step 3 : SemanticEncoder refines the features in-place (no temporal
+    // Step 3: SemanticEncoder refines the features in-place (no temporal
     // downsample), output stays T-first (T_s, 768).
     std::vector<float> e_semantic = pipeline_codec_sem_enc_test(pc, features_t.data(), T_s);
     if (e_semantic.empty()) {
         return {};
     }
 
-    // Step 4 : DAC encoder. Decide pad branch from analytical T_a vs measured
+    // Step 4: DAC encoder. Decide pad branch from analytical T_a vs measured
     // T_s. Upstream uses self.pad = hop_length // 2 = 480 zeros on each side.
     const int          T_a_no_pad = compute_dac_output_length(n_samples);
     std::vector<float> e_acoustic;
@@ -427,7 +427,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         return {};
     }
 
-    // Step 5 : fused graph for concat + fc + RVQ encode. ac and sem land on
+    // Step 5: fused graph for concat + fc + RVQ encode. ac and sem land on
     // the backend as inputs, the rest stays on the GPU until the codes copy.
     const int    T              = T_s;
     const int    n_max_nodes    = 4096;
@@ -455,7 +455,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
     struct ggml_tensor * ac_c  = ggml_cont(gctx, ggml_transpose(gctx, ac_t));
     struct ggml_tensor * sem_c = ggml_cont(gctx, ggml_transpose(gctx, sem_t));
 
-    // Concat [acoustic, semantic] on the channel axis ne[0] : (256+768=1024, T).
+    // Concat [acoustic, semantic] on the channel axis ne[0]: (256+768=1024, T).
     // Upstream order in encode() is torch.cat([e_acoustic, e_semantic], dim=1).
     struct ggml_tensor * pre_fc = ggml_concat(gctx, ac_c, sem_c, 0);
     ggml_set_name(pre_fc, "encode_pre_fc");
@@ -466,7 +466,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
     embed                      = ggml_add(gctx, embed, fcb2d);
     ggml_set_name(embed, "encode_embed");
 
-    // Optional debug : keep pre_fc and embed alive across the graph so we can
+    // Optional debug: keep pre_fc and embed alive across the graph so we can
     // copy them back post compute, to compare the RVQ input bit-for-bit and
     // isolate where the divergence is born (concat vs fc Linear).
     const bool dump = std::getenv("OMNIVOICE_DUMP_STAGES") != NULL;
@@ -475,7 +475,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         ggml_set_output(embed);
     }
 
-    // RVQ encode loop : 8 codebooks, each producing a (T,) i32 tensor with the
+    // RVQ encode loop: 8 codebooks, each producing a (T,) i32 tensor with the
     // selected indices. The graph itself emits 8 separate output tensors.
     struct ggml_tensor * idx_per_k[RVQ_NUM_CODEBOOKS] = { 0 };
     rvq_encode_graph(gctx, &pc->rvq, embed, idx_per_k);
@@ -520,7 +520,7 @@ std::vector<int32_t> pipeline_codec_encode(PipelineCodec * pc,
         dump_tensor("cpp_encode_embed.raw", embed);
     }
 
-    // Pack codes row-major : (CB, T) with codebook leading.
+    // Pack codes row-major: (CB, T) with codebook leading.
     std::vector<int32_t> codes((size_t) RVQ_NUM_CODEBOOKS * (size_t) T);
     for (int k = 0; k < RVQ_NUM_CODEBOOKS; k++) {
         ggml_backend_tensor_get(idx_per_k[k], &codes[(size_t) k * (size_t) T], 0, (size_t) T * sizeof(int32_t));
@@ -545,13 +545,13 @@ void pipeline_codec_free(PipelineCodec * pc) {
     dac_enc_free(&pc->dac_enc);
     dac_free(&pc->dac);
     wctx_free(&pc->wctx);
-    // Idempotent : releases the GGUF mmap when a throw left it open mid-load,
+    // Idempotent: releases the GGUF mmap when a throw left it open mid-load,
     // no-op on the success path where it was closed after wctx_alloc.
     gf_close(&pc->gguf);
     *pc = {};
 }
 
-// Debug : run only the DAC encoder on a precomputed audio waveform. Used to
+// Debug: run only the DAC encoder on a precomputed audio waveform. Used to
 // validate dac-encoder.h in isolation against reference acoustic_encoder before
 // the full encode pipeline (HuBERT, SemanticEncoder, fc, RVQ) is wired up.
 //
@@ -608,7 +608,7 @@ static std::vector<float> pipeline_codec_dac_enc_test(PipelineCodec * pc, const 
     return latent_out;
 }
 
-// Debug : run only the SemanticEncoder on a precomputed [T, 768] f32 input
+// Debug: run only the SemanticEncoder on a precomputed [T, 768] f32 input
 // (typically the post-HuBERT downsampled features dumped from the reference). The
 // output has the same shape, returned flat in GGML layout (T fast, 768 slow).
 static std::vector<float> pipeline_codec_sem_enc_test(PipelineCodec * pc, const float * features_f32, int n_frames) {
@@ -660,7 +660,7 @@ static std::vector<float> pipeline_codec_sem_enc_test(PipelineCodec * pc, const 
     return out;
 }
 
-// Debug : full _extract_semantic_features pipeline.
+// Debug: full _extract_semantic_features pipeline.
 //   audio (16 kHz pre-padded) -> feat_extractor -> feat_projection
 //   -> enc_init -> 12 transformer layers (capture 13 hidden states)
 //   -> mean over the 13 states -> downsample time axis by 2
@@ -688,7 +688,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     ggml_set_name(audio, "audio");
     ggml_set_input(audio);
 
-    // Feature extraction stack : audio -> conv -> projection -> enc_init.
+    // Feature extraction stack: audio -> conv -> projection -> enc_init.
     // The extra out_post_ln tap on the projection lets us tell the LayerNorm
     // and the 512 -> 768 Linear apart inside hubert-feat-proj.
     struct ggml_tensor * feat         = hubert_feat_build_graph(gctx, &pc->hubert_feat, audio);
@@ -696,7 +696,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     struct ggml_tensor * proj         = hubert_proj_build_graph(gctx, &pc->hubert_proj, feat, &proj_post_ln);
     struct ggml_tensor * h            = hubert_enc_init_build_graph(gctx, &pc->hubert_enc_init, proj);
 
-    // Capture the 13 hidden states fed to the stack mean : (post enc_init,
+    // Capture the 13 hidden states fed to the stack mean: (post enc_init,
     // post layer 0, ..., post layer 11). The reference encoder loop snapshots the input
     // before each layer call, then appends the final output once after the
     // loop, which is mathematically the same sequence.
@@ -708,7 +708,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
         states[i + 1] = h;
     }
 
-    // Mean-pool the 13 states : sum then scale by 1/13. ggml_add chains nicely
+    // Mean-pool the 13 states: sum then scale by 1/13. ggml_add chains nicely
     // and stays within the F32/F16 src1 contract on CUDA.
     struct ggml_tensor * sum = states[0];
     for (int i = 1; i < n_states; i++) {
@@ -725,7 +725,7 @@ static std::vector<float> pipeline_codec_hubert_features_test(PipelineCodec * pc
     struct ggml_tensor * features = ggml_cont(gctx, strided);
     ggml_set_output(features);
 
-    // Bisect taps : keep the buffers of the intermediate stages alive past the
+    // Bisect taps: keep the buffers of the intermediate stages alive past the
     // memory planner so they can be copied back after compute. Cheap, only 8
     // [768, T_h] f32 tensors plus feat at [512, T_feat] and proj-ln at
     // [512, T_feat], total ~13 MB.

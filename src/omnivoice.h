@@ -3,7 +3,7 @@
 //
 // Single-header public API. Pure C99, consumable from C and C++ alike.
 // Bindings (Python ctypes, Rust bindgen, Go cgo) parse this file directly.
-// Style follows whisper.h / llama.h : extern "C" linkage on every entry,
+// Style follows whisper.h / llama.h: extern "C" linkage on every entry,
 // POD structs only, const char * UTF-8 strings, ov_status enum returns.
 //
 // The opaque ov_context handle aggregates every module the synthesis path
@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-// Symbol visibility. Three Windows cases : building the SHARED target
+// Symbol visibility. Three Windows cases: building the SHARED target
 // (OMNIVOICE_BUILD set, dllexport), consuming the SHARED target from
 // outside (nothing set, dllimport), consuming the STATIC archive
 // (OMNIVOICE_STATIC set by the static target's INTERFACE definitions,
@@ -45,7 +45,7 @@ extern "C" {
 // Struct ABI version. Incremented every time a public POD struct grows a
 // new field at the end. Callers fill `.abi_version = OV_ABI_VERSION` (or
 // let ov_*_default_params set it). Entries that consume those structs
-// reject inputs whose abi_version exceeds the build-time constant : this
+// reject inputs whose abi_version exceeds the build-time constant: this
 // guards a binary built against vN from receiving a struct laid out for
 // vN+1 by a freshly compiled binding. Adding fields stays backward-compat
 // because the new tail is zero-init in older callers and the lib reads
@@ -73,7 +73,7 @@ enum ov_status {
 };
 
 // Returns the last error message produced on the calling thread by any
-// ov_* entry, as a NUL-terminated UTF-8 string. errno-style semantics : the
+// ov_* entry, as a NUL-terminated UTF-8 string. errno-style semantics: the
 // pointer is only meaningful right after a failure (ov_init returning NULL,
 // or any ov_* entry returning a negative ov_status) ; calling it after a
 // successful entry yields the previous message or an empty string. Storage
@@ -82,10 +82,10 @@ enum ov_status {
 // failing ov_* entry on the same thread.
 OV_API const char * ov_last_error(void);
 
-// Output audio buffer. Plain POD : the samples pointer is malloc-allocated
+// Output audio buffer. Plain POD: the samples pointer is malloc-allocated
 // by ov_synthesize, owned by the struct, released by ov_audio_free. Do not
 // free samples directly nor reassign without freeing first. Zero-initialise
-// before the first use : `struct ov_audio a = {0};`.
+// before the first use: `struct ov_audio a = {0};`.
 struct ov_audio {
     float * samples;      // mono PCM, malloc-allocated
     int     n_samples;    // length in samples
@@ -114,7 +114,7 @@ struct ov_init_params {
     bool         clamp_fp16;
 };
 
-// Initialise to the standard defaults : codec_path NULL (caller must set
+// Initialise to the standard defaults: codec_path NULL (caller must set
 // it for synthesis), use_fa true, clamp_fp16 false.
 OV_API void ov_init_default_params(struct ov_init_params * p);
 
@@ -133,7 +133,7 @@ OV_API void ov_free(struct ov_context * ov);
 typedef bool (*ov_cancel_cb)(void * user_data);
 
 // Streaming output callback. When set on ov_tts_params, the synth pipeline
-// runs in streaming mode : audio is post processed and emitted chunk by
+// runs in streaming mode: audio is post processed and emitted chunk by
 // chunk through this callback rather than accumulated into the `out` buffer
 // of ov_synthesize. Returning false aborts the synthesis with
 // OV_STATUS_CANCELLED, identical to the ov_cancel_cb behaviour. The samples
@@ -142,7 +142,7 @@ typedef bool (*ov_cancel_cb)(void * user_data);
 //
 // Bit perfect against the buffered path for voice cloning. For voice design
 // (no reference) the streaming pipeline skips peak / 0.5 normalisation since
-// the global peak is unknowable before the last sample : output level then
+// the global peak is unknowable before the last sample: output level then
 // runs roughly 6 to 12 dB below the buffered path. Logged at INFO when this
 // branch fires.
 typedef bool (*ov_audio_chunk_cb)(const float * samples, int n_samples, void * user_data);
@@ -162,7 +162,7 @@ enum ov_log_level {
 // Logging callback. msg is a NUL-terminated UTF-8 string already formatted
 // by the lib, with no trailing newline (the callback is free to add one).
 // user_data is forwarded verbatim from ov_log_set. Called from any thread
-// the lib runs on : the callback must be reentrant.
+// the lib runs on: the callback must be reentrant.
 typedef void (*ov_log_cb)(enum ov_log_level level, const char * msg, void * user_data);
 
 // Install a global log callback. Passing cb == NULL restores the default
@@ -172,7 +172,7 @@ typedef void (*ov_log_cb)(enum ov_log_level level, const char * msg, void * user
 OV_API void ov_log_set(ov_log_cb cb, void * user_data);
 
 // Synthesis parameters. Strings are NULL-terminated UTF-8 ; NULL maps to
-// empty. Reference inputs are mutually exclusive : either pre-encoded
+// empty. Reference inputs are mutually exclusive: either pre-encoded
 // tokens [K, ref_T] OR raw 24 kHz mono samples. Passing both fails with
 // OV_STATUS_INVALID_PARAMS. The MaskGIT sampler config is flattened
 // directly into this struct (seven mg_* fields) to keep it fully POD.
@@ -199,7 +199,7 @@ struct ov_tts_params {
 
     // Generation flags. denoise toggles the <|denoise|> marker emitted
     // only when a reference is present. preprocess_prompt mirrors the
-    // upstream Python flag : when true, applies add_punctuation to
+    // upstream Python flag: when true, applies add_punctuation to
     // ref_text and silence-trims the raw reference waveform.
     bool denoise;
     bool preprocess_prompt;
@@ -232,7 +232,7 @@ struct ov_tts_params {
     void *       cancel_user_data;
 
     // Streaming output. When on_chunk is non NULL, ov_synthesize runs the
-    // streaming pipeline : audio chunks emit through on_chunk and `out`
+    // streaming pipeline: audio chunks emit through on_chunk and `out`
     // stays empty on success. on_chunk NULL keeps the buffered path.
     ov_audio_chunk_cb on_chunk;
     void *            on_chunk_user_data;

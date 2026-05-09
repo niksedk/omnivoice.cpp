@@ -1,10 +1,10 @@
 #pragma once
-// rvq-codec.h : Residual Vector Quantization codec (encode + decode, GGML)
+// rvq-codec.h: Residual Vector Quantization codec (encode + decode, GGML)
 // Reads 8 codebooks of 1024 entries (codebook_dim=64, hidden=1024).
 //
-// Decode side : codes [B, 8, T] i32 -> latent [B, 1024, T] f32 by summing
+// Decode side: codes [B, 8, T] i32 -> latent [B, 1024, T] f32 by summing
 // project_out(embed[k][idx_k]) across all 8 codebooks.
-// Encode side : embeddings [B, 1024, T] f32 -> codes [B, 8, T] i32 via the
+// Encode side: embeddings [B, 1024, T] f32 -> codes [B, 8, T] i32 via the
 // residual loop: at each step project_in to 64-d, find the nearest codebook
 // entry by Euclidean distance, subtract the reconstructed quantized vector,
 // continue with the residual.
@@ -72,7 +72,7 @@ static bool rvq_load(RVQCodec * rvq, WeightCtx * wctx, const GGUFModel & gf) {
         // accurate residual chain) or BF16 (downcast). We branch on the source
         // dtype to decode each value to f32 once, then accumulate squared sums
         // per entry.
-        // Memory layout : embed ne=(codebook_dim, codebook_size) row-major
+        // Memory layout: embed ne=(codebook_dim, codebook_size) row-major
         //   so flat[j * codebook_dim + i] is the i-th component of entry j.
         const enum ggml_type embed_type = rvq->cb[k].embed->type;
         const void *         raw_embed  = gf_get_data(gf, name);
@@ -124,7 +124,7 @@ static bool rvq_load(RVQCodec * rvq, WeightCtx * wctx, const GGUFModel & gf) {
         }
 
         snprintf(name, sizeof(name), "quantizer.quantizers.%d.project_out.bias", k);
-        // F32 cast at load : ggml_add CUDA only accepts src1 in F32 or F16.
+        // F32 cast at load: ggml_add CUDA only accepts src1 in F32 or F16.
         // Cost is 2 KB extra per codebook (8 of them), negligible.
         rvq->cb[k].project_out_b = gf_load_tensor_f32(wctx, gf, name);
         if (!rvq->cb[k].project_out_b) {
@@ -200,7 +200,7 @@ static struct ggml_tensor * rvq_decode_graph(struct ggml_context * ctx,
 //       quant  = project_out_w[k] @ e_k + project_out_b[k] # (hidden, T)
 //       residual = residual - quant
 //
-// Note : ||h||^2 is dropped from the score because it is constant across all
+// Note: ||h||^2 is dropped from the score because it is constant across all
 // codebook entries for a given frame and so does not affect the argmax.
 // e_sq is precomputed on CPU at rvq_load time to avoid a bf16 sqr per
 // inference.
@@ -214,7 +214,7 @@ static struct ggml_tensor * rvq_encode_graph(struct ggml_context * ctx,
     for (int k = 0; k < rvq->num_codebooks; k++) {
         const RVQCodebook & cb = rvq->cb[k];
 
-        // 1. project_in : (hidden, T) -> (codebook_dim, T)
+        // 1. project_in: (hidden, T) -> (codebook_dim, T)
         struct ggml_tensor * h64 = ggml_mul_mat(ctx, cb.project_in_w, residual);
         h64                      = ggml_add(ctx, h64, cb.project_in_b);
 

@@ -127,7 +127,7 @@ static size_t voice_design_match(const std::string & a,
     return best_size + left + right;
 }
 
-// SequenceMatcher.ratio() : 2 * matched / (len(a) + len(b)).
+// SequenceMatcher.ratio(): 2 * matched / (len(a) + len(b)).
 static float voice_design_ratio(const std::string & a, const std::string & b) {
     if (a.empty() && b.empty()) {
         return 1.0f;
@@ -361,7 +361,7 @@ static bool voice_design_normalize(const VoiceDesign * vd,
         return false;
     }
 
-    // Language consistency : dialect forces Chinese, accent forces English.
+    // Language consistency: dialect forces Chinese, accent forces English.
     bool has_dialect = false;
     bool has_accent  = false;
     for (const auto & n : normalised) {
@@ -401,7 +401,7 @@ static bool voice_design_normalize(const VoiceDesign * vd,
         }
     }
 
-    // Category conflict check : at most one item per mutually-exclusive set.
+    // Category conflict check: at most one item per mutually-exclusive set.
     std::vector<std::vector<std::string>> conflicts;
     for (const auto & cat : vd->mutually_exclusive) {
         std::vector<std::string> hits;
