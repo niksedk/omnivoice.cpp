@@ -1,0 +1,207 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag/name to publish under (e.g. omnivoice-2026-05-17). A tag will be created on the current commit if it does not exist.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64-cpu
+            runner: windows-2022
+            artifact: omnivoice-win64-cpu.zip
+            cmake_args: ''
+            wrap_in_folder: false
+
+          - name: windows-x64-vulkan
+            runner: windows-2022
+            artifact: omnivoice-win64-vulkan.zip
+            cmake_args: '-DGGML_VULKAN=ON'
+            wrap_in_folder: false
+
+          - name: windows-x64-cuda
+            runner: windows-2022
+            artifact: omnivoice-win64-cuda.zip
+            cmake_args: '-DGGML_CUDA=ON'
+            wrap_in_folder: false
+
+          - name: macos-universal-cpu-metal
+            runner: macos-14
+            artifact: omnivoice-macos-universal-cpu-metal.zip
+            cmake_args: '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON'
+            wrap_in_folder: true
+
+          - name: linux-x64-cpu
+            runner: ubuntu-22.04
+            artifact: omnivoice-linux-x64-cpu.zip
+            cmake_args: '-DGGML_BLAS=ON'
+            wrap_in_folder: true
+
+          - name: linux-arm64-cpu
+            runner: ubuntu-24.04-arm
+            artifact: omnivoice-linux-arm64-cpu.zip
+            cmake_args: '-DGGML_BLAS=ON'
+            wrap_in_folder: true
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Vulkan SDK (Windows Vulkan)
+        if: matrix.name == 'windows-x64-vulkan'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.3.290.0
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      - name: Install CUDA Toolkit (Windows CUDA)
+        if: matrix.name == 'windows-x64-cuda'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.3'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      - name: Install OpenBLAS (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopenblas-dev pkg-config
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" || ^
+          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" || ^
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S . -B build -A x64 ${{ matrix.cmake_args }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cmake --build build --config Release -j "$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Package
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          WRAP: ${{ matrix.wrap_in_folder }}
+        run: |
+          set -e
+          stage="$RUNNER_TEMP/stage"
+          rm -rf "$stage" dist
+          mkdir -p "$stage" dist
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # MSVC multi-config generator puts outputs under build/Release/.
+            srcdir="build/Release"
+            [ -d "$srcdir" ] || srcdir="build"
+            cp "$srcdir"/omnivoice-tts.exe \
+               "$srcdir"/omnivoice-codec.exe \
+               "$srcdir"/quantize.exe "$stage/"
+            # Bundle every DLL the build produced (ggml backends + their runtime deps,
+            # e.g. cudart64_12.dll, cublas64_12.dll, vulkan-1 loader if it lands here).
+            shopt -s nullglob
+            for dll in "$srcdir"/*.dll; do cp "$dll" "$stage/"; done
+            shopt -u nullglob
+          else
+            cp build/omnivoice-tts build/omnivoice-codec build/quantize "$stage/"
+            shopt -s nullglob
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              for f in build/*.dylib build/*.metallib; do cp "$f" "$stage/"; done
+            else
+              for f in build/*.so build/*.so.*; do cp "$f" "$stage/"; done
+            fi
+            shopt -u nullglob
+          fi
+
+          # README + LICENSE so the unpacked folder is self-describing.
+          for f in README.md LICENSE; do
+            [ -f "$f" ] && cp "$f" "$stage/"
+          done
+
+          # Subtitle Edit's downloader (DownloadTtsViewModel.OmniVoice branch) expects
+          # Windows zips to be flat and macOS/Linux zips to wrap binaries in a single
+          # top-level folder named after the archive - so it can flatten on extract.
+          base="${ARTIFACT%.zip}"
+          if [ "$WRAP" = "true" ]; then
+            wrapped="$RUNNER_TEMP/$base"
+            rm -rf "$wrapped"
+            mv "$stage" "$wrapped"
+            (cd "$RUNNER_TEMP" && 7z a -tzip -mx=9 "$GITHUB_WORKSPACE/dist/$ARTIFACT" "$base") >/dev/null
+          else
+            (cd "$stage" && 7z a -tzip -mx=9 "$GITHUB_WORKSPACE/dist/$ARTIFACT" .) >/dev/null
+          fi
+          ls -lah dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Fetch OmniVoices.zip from SubtitleEdit support-files
+        run: |
+          curl -fL --retry 5 --retry-delay 5 \
+            -o dist/OmniVoices.zip \
+            https://github.com/SubtitleEdit/support-files/releases/download/omnivoice-26-06/OmniVoices.zip
+
+      - name: List release assets
+        run: ls -lah dist
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/omnivoice-win64-cpu.zip
+            dist/omnivoice-win64-vulkan.zip
+            dist/omnivoice-win64-cuda.zip
+            dist/omnivoice-macos-universal-cpu-metal.zip
+            dist/omnivoice-linux-x64-cpu.zip
+            dist/omnivoice-linux-arm64-cpu.zip
+            dist/OmniVoices.zip
