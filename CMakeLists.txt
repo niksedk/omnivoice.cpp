@@ -36,6 +36,24 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# Bake a relative-to-binary RPATH so the release zip works after extraction.
+# Without this, CMake leaves the build-machine absolute path (e.g. CI's
+# /Users/runner/work/omnivoice.cpp/omnivoice.cpp/build) baked into LC_RPATH on
+# macOS / RUNPATH on Linux; users then see dyld errors like
+#   "Library not loaded: @rpath/libggml.0.dylib ... no such file"
+# even though the dylibs sit right next to the binary.
+# BUILD_WITH_INSTALL_RPATH=ON makes the linker write INSTALL_RPATH directly,
+# so we don't need a separate install step to fix it up.
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@executable_path")
+    set(CMAKE_BUILD_RPATH   "@executable_path")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+    set(CMAKE_BUILD_RPATH   "$ORIGIN")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+endif()
+
 # Audio tokenizer tensor names can exceed default GGML_MAX_NAME of 64
 add_compile_definitions(GGML_MAX_NAME=128)
 
